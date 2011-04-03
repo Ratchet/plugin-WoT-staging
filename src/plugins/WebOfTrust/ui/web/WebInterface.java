@@ -154,6 +154,8 @@ public class WebInterface {
 	
 	public class ConfigWebInterfaceToadlet extends WebInterfaceToadlet {
 
+		WebOfTrust mWoT;
+		
 		@Override
 		public void handleMethodGET(URI uri, HTTPRequest req, ToadletContext ctx)
 				throws ToadletContextClosedException, IOException,
@@ -168,13 +170,14 @@ public class WebInterface {
 			super.handleMethodPOST(uri, request, ctx);
 		}
 
-		protected ConfigWebInterfaceToadlet(HighLevelSimpleClient client, WebInterface wi, NodeClientCore core, String pageTitle) {
+		protected ConfigWebInterfaceToadlet(HighLevelSimpleClient client, WebInterface wi, NodeClientCore core, String pageTitle, WebOfTrust mWoT) {
 			super(client, wi, core, pageTitle);
+			this.mWoT = mWoT;
 		}
 
 		@Override
 		WebPage makeWebPage(HTTPRequest req, ToadletContext context) {
-			return new ConfigurationPage(this, req, context, l10n());
+			return new ConfigurationPage(this, req, context, l10n(), mWoT.getIdentityFetcher());
 		}
 	}
 
@@ -456,7 +459,7 @@ public class WebInterface {
 		homeToadlet = new HomeWebInterfaceToadlet(null, this, mWoT.getPluginRespirator().getNode().clientCore, "");
 		ownIdentitiesToadlet = new OwnIdentitiesWebInterfaceToadlet(null, this, mWoT.getPluginRespirator().getNode().clientCore, "OwnIdentities");
 		knownIdentitiesToadlet = new KnownIdentitiesWebInterfaceToadlet(null, this, mWoT.getPluginRespirator().getNode().clientCore, "KnownIdentities");
-		configurationToadlet = new ConfigWebInterfaceToadlet(null, this, mWoT.getPluginRespirator().getNode().clientCore, "Configuration");
+		configurationToadlet = new ConfigWebInterfaceToadlet(null, this, mWoT.getPluginRespirator().getNode().clientCore, "Configuration", mWoT);
 		
 		container.register(homeToadlet, "WebInterface.WotMenuName", mURI+"/", true, "WebInterface.WotMenuItem.Home", "WebInterface.WotMenuItem.Home.Tooltip", false, null);
 		container.register(ownIdentitiesToadlet, "WebInterface.WotMenuName", mURI + "/OwnIdentities", true, "WebInterface.WotMenuItem.OwnIdentities", "WebInterface.WotMenuItem.OwnIdentities.Tooltip", false, null);

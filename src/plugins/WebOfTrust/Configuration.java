@@ -206,7 +206,8 @@ public final class Configuration extends Persistent {
 	 * @param overwrite If true, overwrite already set values with the default value.
 	 */
 	public synchronized void setDefaultValues(boolean overwrite) {
-
+		if(!containsInt("standby"))
+		set("standby",0);
 	}
 
 	@Override

@@ -55,6 +55,8 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 	private final ExtObjectContainer mDB;
 	
 	private final USKManager mUSKManager;
+	
+	private final Configuration mConfig;
 
 	/** A reference to the HighLevelSimpleClient used to talk with the node */
 	private final HighLevelSimpleClient mClient;
@@ -66,6 +68,10 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 	 * This sucks: We always request ALL identities to allow ULPRs so we must assume that those HashSets will not fit into memory
 	 * if the WoT becomes large. We should instead ask the node whether we already have a request for the given SSK URI. So how to do that??? */
 	private final HashMap<String, USKRetriever> mRequests = new HashMap<String, USKRetriever>(128); /* TODO: profile & tweak */
+	
+	/**Hashtable for standby mode. In standby mode all identities in mRequests get copied here and fetches are aborted.
+	 * When standby is deactivated, mRequests gets filled again from here and fetches are started*/
+	private final HashMap<String, Identity> sRequests = new HashMap<String, Identity>(128);
 	
 	private final TrivialTicker mTicker;
 	
@@ -92,6 +98,7 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 		}
 		
 		mRequestClient = mWoT.getRequestClient();
+		mConfig = mWoT.getConfig();
 		
 		deleteAllCommands();
 	}
@@ -374,11 +381,22 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 					retriever = null;
 				}
 			}
+			/**On startup, use config setting for standby mode to decide if identity should be put into mRequests or sRequests.
+			* If standby mode is toggled during runtime, extra methods take care of copying mRequests entries to sRequests and
+			* vice versa. These methods also start/stop the fetches/subscriptions. */
+			Integer standby = mConfig.getInt("standby");
+			
+			if(retriever == null) {
+				if(standby == 0) {
+					Logger.debug(this, "adding to mRequests: " + identity.getID());
+					mRequests.put(identity.getID(), fetch(usk));
+					mUSKManager.hintUpdate(usk, identity.getLatestEditionHint(), mClientContext);
+				} else {
+					Logger.debug(this, "adding to sRequests: " + identity.getID());
+					sRequests.put(identity.getID(), identity);
+				}
+			}
 
-			if(retriever == null)
-				mRequests.put(identity.getID(), fetch(usk));
-
-			mUSKManager.hintUpdate(usk, identity.getLatestEditionHint(), mClientContext);
 	}
 	
 	/**
@@ -434,6 +452,42 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 		fetchContext.maxOutputLength = XMLTransformer.MAX_IDENTITY_XML_BYTE_SIZE;
 		Logger.debug(this, "Trying to start fetching uri " + usk); 
 		return mUSKManager.subscribeContent(usk, this, true, fetchContext, RequestStarter.UPDATE_PRIORITY_CLASS, mRequestClient);
+	}
+	
+	public synchronized void startStandbyMode() {
+		Logger.debug(this, "entering standby mode");
+		String[] retrievers = mRequests.keySet().toArray(new String[mRequests.size()]);
+		sRequests.clear();
+		for(String i : retrievers) {
+			Logger.debug(this, "mRequestKey: "+i);
+			try {
+				Identity identity = mWoT.getIdentityByID(i);
+				Logger.debug(this, "putting into sRequests: "+i.toString());
+				sRequests.put(i, identity);
+				abortFetch(i);
+			} catch (UnknownIdentityException e) {
+				Logger.debug(this, "Identity already deleted");
+			}
+		}
+	}
+	public synchronized void stopStandbyMode() {
+		Logger.debug(this, "leaving standby mode");
+		String[] ids = sRequests.keySet().toArray(new String[sRequests.size()]);
+		for(String i : ids) {
+			Logger.debug(this, "sRequestKey: "+i);
+			try {
+				Identity identity = mWoT.getIdentityByID(i);
+				sRequests.remove(i);
+				USK usk = USK.create(identity.getRequestURI());
+				Logger.debug(this, "starting fetch for: "+i);
+				mRequests.put(identity.getID(), fetch(usk));
+				mUSKManager.hintUpdate(usk, identity.getLatestEditionHint(), mClientContext);
+			} catch (UnknownIdentityException e) {
+				Logger.debug(this, "Identity already deleted");
+			} catch(Exception e) {
+				Logger.error(this, "Fetching identity failed!", e);
+			}
+		}
 	}
 	
 	public short getPollingPriorityNormal() {
