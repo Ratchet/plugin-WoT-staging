@@ -495,7 +495,7 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 	}
 
 	public short getPollingPriorityProgress() {
-		return RequestStarter.UPDATE_PRIORITY_CLASS;
+		return RequestStarter.IMMEDIATE_SPLITFILE_PRIORITY_CLASS;
 	}
 
 	/**
