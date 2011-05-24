@@ -207,7 +207,7 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 	}
 	
 	private synchronized void deleteAllCommands() {
-		synchronized(mDB.lock()) {
+		synchronized(Persistent.transactionLock(mDB)) {
 			try {
 				if(logDEBUG) Logger.debug(this, "Deleting all identity fetcher commands ...");
 				
@@ -309,7 +309,7 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 	public void run() {
 		synchronized(mWoT) { // Lock needed because we do getIdentityByID() in fetch()
 		synchronized(this) {
-		synchronized(mDB.lock()) {
+		synchronized(Persistent.transactionLock(mDB)) {
 			try  {
 				if(logDEBUG) Logger.debug(this, "Processing identity fetcher commands ...");
 				
