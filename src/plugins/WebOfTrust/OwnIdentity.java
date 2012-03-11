@@ -9,7 +9,9 @@ import java.util.Date;
 
 import plugins.WebOfTrust.exceptions.InvalidParameterException;
 import freenet.keys.FreenetURI;
+import freenet.keys.InsertableUSK;
 import freenet.support.CurrentTimeUTC;
+import freenet.support.Logger;
 
 /**
  * A local Identity (it belongs to the user)
@@ -32,8 +34,10 @@ public final class OwnIdentity extends Identity {
 	 * @param nickName The nickName of this OwnIdentity
 	 * @param publishTrustList Whether this OwnIdentity publishes its trustList or not 
 	 * @throws InvalidParameterException If a given parameter is invalid
+	 * @throws MalformedURLException if insertURI isn't a valid insert URI, or if requestURI isn't
+	 *                               a valid request URI
 	 */
-	public OwnIdentity (WebOfTrust myWoT, FreenetURI insertURI, FreenetURI requestURI, String nickName, boolean publishTrustList) throws InvalidParameterException {	
+	public OwnIdentity (WebOfTrust myWoT, FreenetURI insertURI, FreenetURI requestURI, String nickName, boolean publishTrustList) throws InvalidParameterException, MalformedURLException {	
 		super(myWoT, requestURI, nickName, publishTrustList);
 		// This is already done by super()
 		// setEdition(0);
@@ -43,6 +47,9 @@ public final class OwnIdentity extends Identity {
 		
 		// initializeTransient() was not called yet so we must use mRequestURI.getEdition() instead of this.getEdition()
 		mInsertURI = insertURI.setKeyType("USK").setDocName(WebOfTrust.WOT_NAME).setSuggestedEdition(mRequestURI.getEdition()).setMetaString(null);
+		
+		//Check that mInsertURI really is a insert URI
+		InsertableUSK.createInsertable(mInsertURI, false);
 		
 		if(!Arrays.equals(mRequestURI.getCryptoKey(), mInsertURI.getCryptoKey()))
 			throw new RuntimeException("Request and insert URI do not fit together!");
@@ -184,6 +191,10 @@ public final class OwnIdentity extends Identity {
 			return clone;
 		} catch(InvalidParameterException e) {
 			throw new RuntimeException(e);
+		} catch (MalformedURLException e) {
+			/* This should never happen since we checked when this object was created */
+			Logger.error(this, "Caugth MalformedURLException in clone()", e);
+			throw new IllegalStateException(e); 
 		}
 	}
 	

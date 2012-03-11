@@ -13,6 +13,7 @@ import java.util.Map.Entry;
 
 import plugins.WebOfTrust.exceptions.InvalidParameterException;
 import freenet.keys.FreenetURI;
+import freenet.keys.USK;
 import freenet.support.Base64;
 import freenet.support.CurrentTimeUTC;
 import freenet.support.IllegalBase64Exception;
@@ -95,14 +96,68 @@ public class Identity extends Persistent implements Cloneable {
 	
 	
 	/**
+	 * A class for generating and validating Identity IDs.
+	 * Its purpose is NOT to be stored in the database: That would make the queries significantly slower.
+	 * We store the IDs as Strings instead for fast queries.
+	 * 
+	 * Its purpose is to allow validation of IdentityIDs which we obtain from the database or from the network.
+	 * 
+	 * TODO: This was added after we already had manual ID-generation / checking in the code everywhere. Use this class instead. 
+	 */
+	public static final class IdentityID {
+		/**
+		 * Taken from Freetalk. TODO: Reduce to the actual value which can be found out by looking up the maximal length of the base64-encoded routing key.
+		 */
+		public static transient final int MAX_IDENTITY_ID_LENGTH = 64;
+		
+		private final String mID;
+		
+		private IdentityID(String id) {
+			if(id.length() > MAX_IDENTITY_ID_LENGTH)
+				throw new IllegalArgumentException("ID is too long, length: " + id.length());
+			
+			try {
+				getRoutingKeyFromID(id);
+			} catch (IllegalBase64Exception e) {
+				throw new RuntimeException("ID does not contain valid Base64: " + id);
+			}
+			
+			mID = id;
+		}
+		
+		public static String constructAndValidate(String id) {
+			return new IdentityID(id).toString();
+		}
+		
+		@Override
+		public String toString() {
+			return mID;
+		}
+		
+		@Override
+		public final boolean equals(final Object o) {
+			if(o instanceof IdentityID)
+				return mID.equals(((IdentityID)o).mID);
+			
+			if(o instanceof String)
+				return mID.equals((String)o);
+			
+			return false;
+		}
+
+	}
+	
+	
+	/**
 	 * Creates an Identity. Only for being used by the WoT package and unit tests, not for user interfaces!
 	 * 
 	 * @param newRequestURI A {@link FreenetURI} to fetch this Identity 
 	 * @param newNickname The nickname of this identity
 	 * @param doesPublishTrustList Whether this identity publishes its trustList or not
 	 * @throws InvalidParameterException if a supplied parameter is invalid
+	 * @throws MalformedURLException if newRequestURI isn't a valid request URI
 	 */
-	protected Identity(WebOfTrust myWoT, FreenetURI newRequestURI, String newNickname, boolean doesPublishTrustList) throws InvalidParameterException {
+	protected Identity(WebOfTrust myWoT, FreenetURI newRequestURI, String newNickname, boolean doesPublishTrustList) throws InvalidParameterException, MalformedURLException {
 		initializeTransient(myWoT);
 		
 		if (!newRequestURI.isUSK() && !newRequestURI.isSSK())
@@ -110,6 +165,10 @@ public class Identity extends Persistent implements Cloneable {
 		
 		//  We only use the passed edition number as a hint to prevent attackers from spreading bogus very-high edition numbers.
 		mRequestURI = newRequestURI.setKeyType("USK").setDocName(WebOfTrust.WOT_NAME).setSuggestedEdition(0).setMetaString(null);
+		
+		//Check that mRequestURI really is a request URI
+		USK.create(mRequestURI);
+		
 		mID = getIDFromURI(mRequestURI);
 		
 		try {
@@ -143,7 +202,7 @@ public class Identity extends Persistent implements Cloneable {
 	 * @param newNickname The nickname of this identity
 	 * @param doesPublishTrustList Whether this identity publishes its trustList or not
 	 * @throws InvalidParameterException if a supplied parameter is invalid
-	 * @throws MalformedURLException if the supplied requestURI isn't a valid FreenetURI
+	 * @throws MalformedURLException if the supplied requestURI isn't a valid request URI
 	 */
 	public Identity(WebOfTrust myWoT, String newRequestURI, String newNickname, boolean doesPublishTrustList)
 		throws InvalidParameterException, MalformedURLException {
@@ -166,6 +225,8 @@ public class Identity extends Persistent implements Cloneable {
 	 * Generates a unique IDfrom a {@link FreenetURI}, which is the routing key of the author encoded with the Freenet-variant of Base64
 	 * We use this to identify identities and perform requests on the database. 
 	 * 
+	 * TODO: Move to class IdentityID.
+	 * 
 	 * @param uri The requestURI of the Identity
 	 * @return A string to uniquely identify the identity.
 	 */
@@ -174,6 +235,9 @@ public class Identity extends Persistent implements Cloneable {
 		return Base64.encode(uri.getRoutingKey());
 	}
 	
+	/**
+	 * TODO: Move to class IdentityID.
+	 */
 	public static final byte[] getRoutingKeyFromID(String id) throws IllegalBase64Exception {
 		return Base64.decode(id);
 	}
@@ -703,7 +767,13 @@ public class Identity extends Persistent implements Cloneable {
 			return false;
 		}
 		
-		if (!getNickname().equals(other.getNickname())) {
+		final String nickname = getNickname();
+		final String otherNickname = other.getNickname();
+		if ((nickname == null) != (otherNickname == null)) {
+			return false;
+		}
+		
+		if(nickname != null && !nickname.equals(otherNickname)) {
 			return false;
 		}
 		
@@ -751,6 +821,10 @@ public class Identity extends Persistent implements Cloneable {
 			
 		} catch (InvalidParameterException e) {
 			throw new RuntimeException(e);
+		} catch (MalformedURLException e) {
+			/* This should never happen since we checked when this object was created */
+			Logger.error(this, "Caugth MalformedURLException in clone()", e);
+			throw new IllegalStateException(e); 
 		}
 	}
 	
@@ -835,6 +909,8 @@ public class Identity extends Persistent implements Cloneable {
 		
 		if(!mID.equals(getIDFromURI(mRequestURI)))
 			throw new IllegalStateException("ID does not match request URI!");
+		
+		IdentityID.constructAndValidate(mID); // Throws if invalid
 		
 		if(mCurrentEditionFetchState == null)
 			throw new NullPointerException("mFetchState==null");

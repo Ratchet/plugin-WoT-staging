@@ -517,7 +517,8 @@ public final class IdentityFetcher implements USKRetrieverCallback, PrioRunnable
 	protected synchronized void stop() {
 		if(logDEBUG) Logger.debug(this, "Trying to stop all requests");
 		
-		mTicker.shutdown();
+		if(mTicker != null)
+			mTicker.shutdown();
 		
 		USKRetriever[] retrievers = mRequests.values().toArray(new USKRetriever[mRequests.size()]);		
 		int counter = 0;		 

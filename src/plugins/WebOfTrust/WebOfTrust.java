@@ -4,12 +4,16 @@
 package plugins.WebOfTrust;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.MalformedURLException;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
+import java.util.Random;
 
+import plugins.WebOfTrust.Score.ScoreID;
+import plugins.WebOfTrust.Trust.TrustID;
 import plugins.WebOfTrust.exceptions.DuplicateIdentityException;
 import plugins.WebOfTrust.exceptions.DuplicateScoreException;
 import plugins.WebOfTrust.exceptions.DuplicateTrustException;
@@ -28,11 +32,14 @@ import plugins.WebOfTrust.ui.web.WebInterface;
 import com.db4o.Db4o;
 import com.db4o.ObjectContainer;
 import com.db4o.ObjectSet;
+import com.db4o.defragment.Defragment;
+import com.db4o.defragment.DefragmentConfig;
 import com.db4o.ext.ExtObjectContainer;
 import com.db4o.query.Query;
 import com.db4o.reflect.jdk.JdkReflector;
 
 import freenet.keys.FreenetURI;
+import freenet.keys.USK;
 import freenet.l10n.BaseL10n;
 import freenet.l10n.BaseL10n.LANGUAGE;
 import freenet.l10n.PluginL10n;
@@ -46,9 +53,12 @@ import freenet.pluginmanager.FredPluginThreadless;
 import freenet.pluginmanager.FredPluginVersioned;
 import freenet.pluginmanager.PluginReplySender;
 import freenet.pluginmanager.PluginRespirator;
+import freenet.support.CurrentTimeUTC;
 import freenet.support.Logger;
 import freenet.support.SimpleFieldSet;
+import freenet.support.SizeUtil;
 import freenet.support.api.Bucket;
+import freenet.support.io.FileUtil;
 
 /**
  * A web of trust plugin based on Freenet.
@@ -75,7 +85,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	public static final String WOT_NAME = "WebOfTrust";
 	
 	public static final String DATABASE_FILENAME =  WOT_NAME + ".db4o"; 
-	public static final int DATABASE_FORMAT_VERSION = 1; 
+	public static final int DATABASE_FORMAT_VERSION = 2; 
 	
 	/**
 	 * The official seed identities of the WoT plugin: If a newbie wants to download the whole offficial web of trust, he needs at least one
@@ -149,6 +159,12 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	private WebInterface mWebInterface;
 	private FCPInterface mFCPInterface;
 	
+	/* Statistics */
+	private int mFullScoreRecomputationCount = 0;
+	private long mFullScoreRecomputationMilliseconds = 0;
+	private int mIncrementalScoreRecomputationCount = 0;
+	private long mIncrementalScoreRecomputationMilliseconds = 0;
+	
 	
 	/* These booleans are used for preventing the construction of log-strings if logging is disabled (for saving some cpu cycles) */
 	
@@ -167,16 +183,22 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 			System.setProperty("java.awt.headless", "true"); 
 	
 			mPR = myPR;
+			
+			/* TODO: This can be used for clean copies of the database to get rid of corrupted internal db4o structures. 
+			/* We should provide an option on the web interface to run this once during next startup and switch to the cloned database */
+			// cloneDatabase(new File(getUserDataDirectory(), DATABASE_FILENAME), new File(getUserDataDirectory(), DATABASE_FILENAME + ".clone"));
+			
 			mDB = openDatabase(new File(getUserDataDirectory(), DATABASE_FILENAME));
 			
 			mConfig = getOrCreateConfig();
 			if(mConfig.getDatabaseFormatVersion() > WebOfTrust.DATABASE_FORMAT_VERSION)
 				throw new RuntimeException("The WoT plugin's database format is newer than the WoT plugin which is being used.");
 			
+			mPuzzleStore = new IntroductionPuzzleStore(this);
+			
 			upgradeDB();
 			
 			mXMLTransformer = new XMLTransformer(this);
-			mPuzzleStore = new IntroductionPuzzleStore(this);
 			
 			mRequestClient = new RequestClient() {
 	
@@ -207,6 +229,9 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 			verifyAndCorrectStoredScores();
 			
 			// Database is up now, integrity is checked. We can start to actually do stuff
+			
+			// TODO: This can be used for doing backups. Implement auto backup, maybe once a week or month
+			//backupDatabase(new File(getUserDataDirectory(), DATABASE_FILENAME + ".backup"));
 			
 			createSeedIdentities();
 			
@@ -264,8 +289,9 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		mDB = openDatabase(new File(databaseFilename));
 		mConfig = getOrCreateConfig();
 		
-		if(mConfig.getDatabaseFormatVersion() > WebOfTrust.DATABASE_FORMAT_VERSION)
-			throw new RuntimeException("The WoT plugin's database format is newer than the WoT plugin which is being used.");
+		if(mConfig.getDatabaseFormatVersion() != WebOfTrust.DATABASE_FORMAT_VERSION)
+			throw new RuntimeException("Database format version mismatch. Found: " + mConfig.getDatabaseFormatVersion() + 
+					"; expected: " + WebOfTrust.DATABASE_FORMAT_VERSION);
 		
 		mPuzzleStore = new IntroductionPuzzleStore(this);
 		
@@ -280,21 +306,14 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
         
         return wotDirectory;
 	}
-
-	/**
-	 * ATTENTION: This function is duplicated in the Freetalk plugin, please backport any changes.
-	 * 
-	 * Initializes the plugin's db4o database.
-	 */
-	private ExtObjectContainer openDatabase(File file) {
-		Logger.normal(this, "Using db4o " + Db4o.version());
-		
+	
+	private com.db4o.config.Configuration getNewDatabaseConfiguration() {
 		com.db4o.config.Configuration cfg = Db4o.newConfiguration();
 		
 		// Required config options:
 		cfg.reflectWith(new JdkReflector(getPluginClassLoader()));
-		// TODO: Optimization: We do explicit activation everywhere. We could change this to 1 and test whether it still works.
-		// We have to do very careful testing though, toad_ said that db4o bugs can occur with depth 1 and manual activation...
+		// TODO: Optimization: We do explicit activation everywhere. We could change this to 0 and test whether everything still works.
+		// Ideally, we would benchmark both 0 and 1 and make it configurable.
 		cfg.activationDepth(1);
 		cfg.updateDepth(1); // This must not be changed: We only activate(this, 1) before store(this).
 		Logger.normal(this, "Default activation depth: " + cfg.activationDepth());
@@ -308,6 +327,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
         
         // Registration of indices (also performance)
         
+        // ATTENTION: Also update cloneDatabase() when adding new classes!
         @SuppressWarnings("unchecked")
 		final Class<? extends Persistent>[] persistentClasses = new Class[] {
         	Configuration.class,
@@ -357,10 +377,153 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
         // TODO: We should check whether db4o inherits the indexed attribute to child classes, for example for this one:
         // Unforunately, db4o does not provide any way to query the indexed() property of fields, you can only set it
         // We might figure out whether inheritance works by writing a benchmark.
-
-		return Db4o.openFile(cfg, file.getAbsolutePath()).ext();
+        
+        return cfg;
 	}
 	
+	private synchronized void restoreDatabaseBackup(File databaseFile, File backupFile) throws IOException {
+		Logger.warning(this, "Trying to restore database backup: " + backupFile.getAbsolutePath());
+		
+		if(mDB != null)
+			throw new RuntimeException("Database is opened already!");
+		
+		if(backupFile.exists()) {
+			try {
+				FileUtil.secureDelete(databaseFile, mPR.getNode().fastWeakRandom);
+			} catch(IOException e) {
+				Logger.warning(this, "Deleting of the database failed: " + databaseFile.getAbsolutePath());
+			}
+			
+			if(backupFile.renameTo(databaseFile)) {
+				Logger.warning(this, "Backup restored!");
+			} else {
+				throw new IOException("Unable to rename backup file back to database file: " + databaseFile.getAbsolutePath());
+			}
+
+		} else {
+			throw new IOException("Cannot restore backup, it does not exist!");
+		}
+	}
+
+	private synchronized void defragmentDatabase(File databaseFile) throws IOException {
+		Logger.normal(this, "Defragmenting database ...");
+		
+		if(mDB != null) 
+			throw new RuntimeException("Database is opened already!");
+		
+		if(mPR == null) {
+			Logger.normal(this, "No PluginRespirator found, probably running as unit test, not defragmenting.");
+			return;
+		}
+		
+		final Random random = mPR.getNode().fastWeakRandom;
+		
+		// Open it first, because defrag will throw if it needs to upgrade the file.
+		{
+			final ObjectContainer database = Db4o.openFile(getNewDatabaseConfiguration(), databaseFile.getAbsolutePath());
+			
+			// Db4o will throw during defragmentation if new fields were added to classes and we didn't initialize their values on existing
+			// objects before defragmenting. So we just don't defragment if the database format version has changed.
+			final boolean canDefragment = peekDatabaseFormatVersion(this, database.ext()) == WebOfTrust.DATABASE_FORMAT_VERSION;
+
+			while(!database.close());
+			
+			if(!canDefragment) {
+				Logger.normal(this, "Not defragmenting, database format version changed!");
+				return;
+			}
+			
+			if(!databaseFile.exists()) {
+				Logger.error(this, "Database file does not exist after openFile: " + databaseFile.getAbsolutePath());
+				return;
+			}
+		}
+
+		final File backupFile = new File(databaseFile.getAbsolutePath() + ".backup");
+		
+		if(backupFile.exists()) {
+			Logger.error(this, "Not defragmenting database: Backup file exists, maybe the node was shot during defrag: " + backupFile.getAbsolutePath());
+			return;
+		}	
+
+		final File tmpFile = new File(databaseFile.getAbsolutePath() + ".temp");
+		FileUtil.secureDelete(tmpFile, random);
+
+		/* As opposed to the default, BTreeIDMapping uses an on-disk file instead of in-memory for mapping IDs. 
+		/* Reduces memory usage during defragmentation while being slower.
+		/* However as of db4o 7.4.63.11890, it is bugged and prevents defragmentation from succeeding for my database, so we don't use it for now. */
+		final DefragmentConfig config = new DefragmentConfig(databaseFile.getAbsolutePath(), 
+																backupFile.getAbsolutePath()
+															//	,new BTreeIDMapping(tmpFile.getAbsolutePath())
+															);
+		
+		/* Delete classes which are not known to the classloader anymore - We do NOT do this because:
+		/* - It is buggy and causes exceptions often as of db4o 7.4.63.11890
+		/* - WOT has always had proper database upgrade code (function upgradeDB()) and does not rely on automatic schema evolution.
+		/*   If we need to get rid of certain objects we should do it in the database upgrade code, */
+		// config.storedClassFilter(new AvailableClassFilter());
+		
+		config.db4oConfig(getNewDatabaseConfiguration());
+		
+		try {
+			Defragment.defrag(config);
+		} catch (Exception e) {
+			Logger.error(this, "Defragment failed", e);
+			
+			try {
+				restoreDatabaseBackup(databaseFile, backupFile);
+				return;
+			} catch(IOException e2) {
+				Logger.error(this, "Unable to restore backup", e2);
+				throw new IOException(e);
+			}
+		}
+
+		final long oldSize = backupFile.length();
+		final long newSize = databaseFile.length();
+
+		if(newSize <= 0) {
+			Logger.error(this, "Defrag produced an empty file! Trying to restore old database file...");
+			
+			databaseFile.delete();
+			try {
+				restoreDatabaseBackup(databaseFile, backupFile);
+			} catch(IOException e2) {
+				Logger.error(this, "Unable to restore backup", e2);
+				throw new IOException(e2);
+			}
+		} else {
+			final double change = 100.0 * (((double)(oldSize - newSize)) / ((double)oldSize));
+			FileUtil.secureDelete(tmpFile, random);
+			FileUtil.secureDelete(backupFile, random);
+			Logger.normal(this, "Defragment completed. "+SizeUtil.formatSize(oldSize)+" ("+oldSize+") -> "
+					+SizeUtil.formatSize(newSize)+" ("+newSize+") ("+(int)change+"% shrink)");
+		}
+
+	}
+
+	
+	/**
+	 * ATTENTION: This function is duplicated in the Freetalk plugin, please backport any changes.
+	 * 
+	 * Initializes the plugin's db4o database.
+	 */
+	private synchronized ExtObjectContainer openDatabase(File file) {
+		Logger.normal(this, "Opening database using db4o " + Db4o.version());
+		
+		if(mDB != null) 
+			throw new RuntimeException("Database is opened already!");
+		
+		try {
+			defragmentDatabase(file);
+		} catch (IOException e) {
+			throw new RuntimeException(e);
+		}
+
+		return Db4o.openFile(getNewDatabaseConfiguration(), file.getAbsolutePath()).ext();
+	}
+	
+	@SuppressWarnings("deprecation")
 	private synchronized void upgradeDB() {
 		int databaseVersion = mConfig.getDatabaseFormatVersion();
 		
@@ -369,12 +532,55 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		
 		// Insert upgrade code here. See Freetalk.java for a skeleton.
 		
+		if(databaseVersion == 1) {
+			Logger.normal(this, "Upgrading database version " + databaseVersion);
+			
+			//synchronized(this) { // Already done at function level
+				synchronized(Persistent.transactionLock(mDB)) {
+					try {
+						Logger.normal(this, "Generating Score IDs...");
+						for(Score score : getAllScores()) {
+							score.generateID();
+							score.storeWithoutCommit();
+						}
+						
+						Logger.normal(this, "Generating Trust IDs...");
+						for(Trust trust : getAllTrusts()) {
+							trust.generateID();
+							trust.storeWithoutCommit();
+						}
+						
+						Logger.normal(this, "Searching for identities with mixed up insert/request URIs...");
+						for(Identity identity : getAllIdentities()) {
+							try {
+								USK.create(identity.getRequestURI());
+							} catch (MalformedURLException e) {
+								if(identity instanceof OwnIdentity) {
+									Logger.error(this, "Insert URI specified as request URI for OwnIdentity, not correcting the URIs as the insert URI" +
+											"might have been published by solving captchas - the identity could be compromised: " + identity);
+								} else {
+									Logger.error(this, "Insert URI specified as request URI for non-own Identity, deleting: " + identity);
+									deleteWithoutCommit(identity);
+								}								
+							}
+						}
+						
+						mConfig.setDatabaseFormatVersion(++databaseVersion);
+						mConfig.storeAndCommit();
+						Logger.normal(this, "Upgraded database to version " + databaseVersion);
+					} catch(RuntimeException e) {
+						Persistent.checkedRollbackAndThrow(mDB, this, e);
+					}
+				}
+			//}			
+		}
+
 		if(databaseVersion != WebOfTrust.DATABASE_FORMAT_VERSION)
 			throw new RuntimeException("Your database is too outdated to be upgraded automatically, please create a new one by deleting " 
 					+ DATABASE_FILENAME + ". Contact the developers if you really need your old data.");
 	}
 	
-	private synchronized void verifyDatabaseIntegrity() {
+	private synchronized boolean verifyDatabaseIntegrity() {
 		deleteDuplicateObjects();
 		deleteOrphanObjects();
 		
@@ -383,10 +589,14 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		final Query q = mDB.query();
 		q.constrain(Persistent.class);
 		
+		boolean result = true;
+		
 		for(final Persistent p : new Persistent.InitializingObjectSet<Persistent>(this, q)) {
 			try {
 				p.startupDatabaseIntegrityTest();
 			} catch(Exception e) {
+				result = false;
+				
 				try {
 					Logger.error(this, "Integrity test failed for " + p, e);
 				} catch(Exception e2) {
@@ -397,6 +607,171 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		}
 		
 		Logger.debug(this, "Database integrity test finished.");
+		
+		return result;
+	}
+	
+	/**
+	 * Does not do proper synchronization! Only use it in single-thread-mode during startup.
+	 * 
+	 * Does a backup of the database using db4o's backup mechanism.
+	 * 
+	 * This will NOT fix corrupted internal structures of databases - use cloneDatabase if you need to fix your database.
+	 */
+	private synchronized void backupDatabase(File newDatabase) {
+		Logger.normal(this, "Backing up database to " + newDatabase.getAbsolutePath());
+		
+		if(newDatabase.exists())
+			throw new RuntimeException("Target exists already: " + newDatabase.getAbsolutePath());
+			
+		WebOfTrust backup = null;
+		
+		boolean success = false;
+		
+		try {
+			mDB.backup(newDatabase.getAbsolutePath());
+			
+			if(logDEBUG) {
+				backup = new WebOfTrust(newDatabase.getAbsolutePath());
+
+				// We do not throw to make the clone mechanism more robust in case it is being used for creating backups
+				
+				Logger.debug(this, "Checking database integrity of clone...");
+				if(backup.verifyDatabaseIntegrity())
+					Logger.debug(this, "Checking database integrity of clone finished.");
+				else 
+					Logger.error(this, "Database integrity check of clone failed!");
+
+				Logger.debug(this, "Checking this.equals(clone)...");
+				if(equals(backup))
+					Logger.normal(this, "Clone is equal!");
+				else
+					Logger.error(this, "Clone is not equal!");
+			}
+			
+			success = true;
+		} finally {
+			if(backup != null)
+				backup.terminate();
+			
+			if(!success)
+				newDatabase.delete();
+		}
+		
+		Logger.normal(this, "Backing up database finished.");
+	}
+	
+	/**
+	 * Does not do proper synchronization! Only use it in single-thread-mode during startup.
+	 * 
+	 * Creates a clone of the source database by reading all objects of it into memory and then writing them out to the target database.
+	 * Does NOT copy the Configuration, the IntroductionPuzzles or the IdentityFetcher command queue.
+	 * 
+	 * The difference to backupDatabase is that it does NOT use db4o's backup mechanism, instead it creates the whole database from scratch.
+	 * This is useful because the backup mechanism of db4o does nothing but copying the raw file:
+	 * It wouldn't fix databases which cannot be defragmented anymore due to internal corruption.
+	 * - Databases which were cloned by this function CAN be defragmented even if the original database couldn't.
+	 * 
+	 * HOWEVER this function uses lots of memory as the whole database is copied into memory.
+	 */
+	private synchronized void cloneDatabase(File sourceDatabase, File targetDatabase) {
+		Logger.normal(this, "Cloning " + sourceDatabase.getAbsolutePath() + " to " + targetDatabase.getAbsolutePath());
+		
+		if(targetDatabase.exists())
+			throw new RuntimeException("Target exists already: " + targetDatabase.getAbsolutePath());
+		
+		WebOfTrust original = null;
+		WebOfTrust clone = null;
+		
+		boolean success = false;
+		
+		try {
+			original = new WebOfTrust(sourceDatabase.getAbsolutePath());
+			
+			// We need to copy all objects into memory and then close & unload the source database before writing the objects to the target one.
+			// - I tried implementing this function in a way where it directly takes the objects from the source database and stores them
+			// in the target database while the source is still open. This did not work: Identity objects disappeared magically, resulting
+			// in Trust objects .storeWithoutCommit throwing "Mandatory object not found" on their associated identities.
+			
+			final HashSet<Identity> allIdentities = new HashSet<Identity>(original.getAllIdentities());
+			final HashSet<Trust> allTrusts = new HashSet<Trust>(original.getAllTrusts());
+			final HashSet<Score> allScores = new HashSet<Score>(original.getAllScores());
+			
+			for(Identity identity : allIdentities) {
+				identity.checkedActivate(16);
+				identity.mWebOfTrust = null;
+				identity.mDB = null;
+			}
+			
+			for(Trust trust : allTrusts) {
+				trust.checkedActivate(16);
+				trust.mWebOfTrust = null;
+				trust.mDB = null;
+			}
+			
+			for(Score score : allScores) {
+				score.checkedActivate(16);
+				score.mWebOfTrust = null;
+				score.mDB = null;
+			}
+			
+			original.terminate();
+			original = null;
+			System.gc();
+			
+			// Now we write out the in-memory copies ...
+			
+			clone = new WebOfTrust(targetDatabase.getAbsolutePath());
+			
+			for(Identity identity : allIdentities) {
+				identity.initializeTransient(clone);
+				identity.storeWithoutCommit();
+			}
+			Persistent.checkedCommit(clone.getDatabase(), clone);
+			
+			for(Trust trust : allTrusts) {
+				trust.initializeTransient(clone);
+				trust.storeWithoutCommit();
+			}
+			Persistent.checkedCommit(clone.getDatabase(), clone);
+			
+			for(Score score : allScores) {
+				score.initializeTransient(clone);
+				score.storeWithoutCommit();
+			}
+			Persistent.checkedCommit(clone.getDatabase(), clone);
+			
+			// And because cloning is a complex operation we do a mandatory database integrity check
+
+			Logger.normal(this, "Checking database integrity of clone...");
+			if(clone.verifyDatabaseIntegrity())
+				Logger.normal(this, "Checking database integrity of clone finished.");
+			else 
+				throw new RuntimeException("Database integrity check of clone failed!");
+			
+			// ... and also test whether the Web Of Trust is equals() to the clone. This does a deep check of all identities, scores & trusts!
+
+			original = new WebOfTrust(sourceDatabase.getAbsolutePath());
+				
+			Logger.normal(this, "Checking original.equals(clone)...");
+			if(original.equals(clone))
+				Logger.normal(this, "Clone is equal!");
+			else
+				throw new RuntimeException("Clone is not equal!");
+
+			success = true;
+		} finally {
+			if(original != null)
+				original.terminate();
+			
+			if(clone != null)
+				clone.terminate();
+			
+			if(!success)
+				targetDatabase.delete();
+		}
+		
+		Logger.normal(this, "Cloning database finished.");
 	}
 	
 	/**
@@ -551,6 +926,29 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		}
 	}
 	
+	/**
+	 * Warning: This function is not synchronized, use it only in single threaded mode.
+	 * @return The WOT database format version of the given database. -1 if there is no Configuration stored in it or multiple configurations exist.
+	 */
+	private static int peekDatabaseFormatVersion(WebOfTrust wot, ExtObjectContainer database) {
+		final Query query = database.query();
+		query.constrain(Configuration.class);
+		@SuppressWarnings("unchecked")
+		ObjectSet<Configuration> result = (ObjectSet<Configuration>)query.execute(); 
+		
+		switch(result.size()) {
+			case 1: {
+				final Configuration config = (Configuration)result.next();
+				config.mWebOfTrust = wot;
+				config.mDB = database;
+				// For the HashMaps to stay alive we need to activate to full depth.
+				config.checkedActivate(4);
+				return config.getDatabaseFormatVersion();
+			}
+			default:
+				return -1;
+		}
+	}
 	
 	/**
 	 * Loads an existing Config object from the database and adds any missing default values to it, creates and stores a new one if none exists.
@@ -665,7 +1063,9 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * @return True if all stored scores were correct. False if there were any errors in stored scores.
 	 */
 	protected synchronized boolean computeAllScoresWithoutCommit() {
-		if(logDEBUG) Logger.debug(this, "Doing a full computation of all Scores...");
+		if(logMINOR) Logger.debug(this, "Doing a full computation of all Scores...");
+		
+		final long beginTime = CurrentTimeUTC.getInMillis();
 		
 		boolean returnValue = true;
 		final ObjectSet<Identity> allIdentities = getAllIdentities();
@@ -881,7 +1281,12 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		
 		mFullScoreComputationNeeded = false;
 		
-		if(logDEBUG) Logger.debug(this, "Full score computation finished.");
+		++mFullScoreRecomputationCount;
+		mFullScoreRecomputationMilliseconds += CurrentTimeUTC.getInMillis() - beginTime;
+		
+		if(logMINOR) {
+			Logger.debug(this, "Full score computation finished. Amount: " + mFullScoreRecomputationCount + "; Avg Time:" + getAverageFullScoreRecomputationTime() + "s");
+		}
 		
 		return returnValue;
 	}
@@ -1238,7 +1643,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 			
 			if(logDEBUG) Logger.debug(this, "Storing an abort-fetch-command...");
 			
-			mFetcher.storeAbortFetchCommandWithoutCommit(identity);
+			if(mFetcher != null) // Can be null if we use this function in upgradeDB()
+				mFetcher.storeAbortFetchCommandWithoutCommit(identity);
 
 			if(logDEBUG) Logger.debug(this, "Deleting the identity...");
 			identity.deleteWithoutCommit();
@@ -1259,12 +1665,15 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	public synchronized Score getScore(final OwnIdentity truster, final Identity trustee) throws NotInTrustTreeException {
 		final Query query = mDB.query();
 		query.constrain(Score.class);
-		query.descend("mTruster").constrain(truster).identity();
-		query.descend("mTrustee").constrain(trustee).identity();
+		query.descend("mID").constrain(new ScoreID(truster, trustee).toString());
 		final ObjectSet<Score> result = new Persistent.InitializingObjectSet<Score>(this, query);
 		
 		switch(result.size()) {
-			case 1: return result.next();
+			case 1: 
+				final Score score = result.next();
+				assert(score.getTruster() == truster);
+				assert(score.getTrustee() == trustee);
+				return score;
 			case 0: throw new NotInTrustTreeException(truster, trustee);
 			default: throw new DuplicateScoreException(truster, trustee, result.size());
 		}
@@ -1411,12 +1820,15 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	public synchronized Trust getTrust(final Identity truster, final Identity trustee) throws NotTrustedException, DuplicateTrustException {
 		final Query query = mDB.query();
 		query.constrain(Trust.class);
-		query.descend("mTruster").constrain(truster).identity();
-		query.descend("mTrustee").constrain(trustee).identity();
+		query.descend("mID").constrain(new TrustID(truster, trustee).toString());
 		final ObjectSet<Trust> result = new Persistent.InitializingObjectSet<Trust>(this, query);
 		
 		switch(result.size()) {
-			case 1: return result.next();
+			case 1: 
+				final Trust trust = result.next();
+				assert(trust.getTruster() == truster);
+				assert(trust.getTrustee() == trustee);
+				return trust;
 			case 0: throw new NotTrustedException(truster, trustee);
 			default: throw new DuplicateTrustException(truster, trustee, result.size());
 		}
@@ -1823,6 +2235,13 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * 
 	 */
 	private synchronized void updateScoresWithoutCommit(final Trust oldTrust, final Trust newTrust) {
+		if(logMINOR) Logger.minor(this, "Doing an incremental computation of all Scores...");
+		
+		final long beginTime = CurrentTimeUTC.getInMillis();
+		// We only include the time measurement if we actually do something.
+		// If we figure out that a full score recomputation is needed just by looking at the initial parameters, the measurement won't be included.
+		boolean includeMeasurement = false;
+		
 		final boolean trustWasCreated = (oldTrust == null);
 		final boolean trustWasDeleted = (newTrust == null);
 		final boolean trustWasModified = !trustWasCreated && !trustWasDeleted;
@@ -1846,6 +2265,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		}
 
 		if(!mFullScoreComputationNeeded && (trustWasCreated || trustWasModified)) {
+			includeMeasurement = true; 
+			
 			for(OwnIdentity treeOwner : getAllOwnIdentities()) {
 				try {
 					// Throws to abort the update of the trustee's score: If the truster has no rank or capacity in the tree owner's view then we don't need to update the trustee's score.
@@ -1952,6 +2373,22 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 				if(mFullScoreComputationNeeded)
 					break;
 			}
+		}	
+		
+		if(includeMeasurement) {
+			++mIncrementalScoreRecomputationCount;
+			mIncrementalScoreRecomputationMilliseconds += CurrentTimeUTC.getInMillis() - beginTime;
+		}
+		
+		if(logMINOR) {
+			final String time = includeMeasurement ?
+							("Stats: Amount: " + mIncrementalScoreRecomputationCount + "; Avg Time:" + getAverageIncrementalScoreRecomputationTime() + "s")
+							: ("Time not measured: Computation was aborted before doing anything.");
+			
+			if(!mFullScoreComputationNeeded)
+				Logger.minor(this, "Incremental computation of all Scores finished. " + time);
+			else
+				Logger.minor(this, "Incremental computation of all Scores not possible, full computation is needed. " + time);
 		}
 		
 		if(!mTrustListImportInProgress) {
@@ -2065,6 +2502,9 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 					initTrustTreeWithoutCommit(identity);
 					
 					beginTrustListImport();
+
+					// Incremental score computation has proven to be very very slow when creating identities so we just schedule a full computation.
+					mFullScoreComputationNeeded = true;
 					
 					for(String seedURI : SEED_IDENTITIES) {
 						try {
@@ -2336,6 +2776,21 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
         return WebOfTrust.l10n.getBase();
     }
 
+    public int getNumberOfFullScoreRecomputations() {
+    	return mFullScoreRecomputationCount;
+    }
+    
+    public synchronized double getAverageFullScoreRecomputationTime() {
+    	return (double)mFullScoreRecomputationMilliseconds / ((mFullScoreRecomputationCount!= 0 ? mFullScoreRecomputationCount : 1) * 1000); 
+    }
+    
+    public int getNumberOfIncrementalScoreRecomputations() {
+    	return mIncrementalScoreRecomputationCount;
+    }
+    
+    public synchronized double getAverageIncrementalScoreRecomputationTime() {
+    	return (double)mIncrementalScoreRecomputationMilliseconds / ((mIncrementalScoreRecomputationCount!= 0 ? mIncrementalScoreRecomputationCount : 1) * 1000); 
+    }
 	
     /**
      * Tests whether two WoT are equal.
