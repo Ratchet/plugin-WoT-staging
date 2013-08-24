@@ -22,6 +22,7 @@ import plugins.WebOfTrust.introduction.IntroductionPuzzle;
 import freenet.client.HighLevelSimpleClient;
 import freenet.client.filter.ContentFilter;
 import freenet.clients.http.PageMaker;
+import freenet.clients.http.RedirectException;
 import freenet.clients.http.Toadlet;
 import freenet.clients.http.ToadletContainer;
 import freenet.clients.http.ToadletContext;
@@ -358,7 +359,7 @@ public class WebInterface {
 			home,
 			ownIdentitiesToadlet,
 			knownIdentitiesToadlet,
-			new ConfigWebInterfaceToadlet(null, this, core, "Configuration", mWot)
+			new ConfigWebInterfaceToadlet(null, this, core, "Configuration", mWoT)
 		));
 
 		/*
@@ -390,7 +391,6 @@ public class WebInterface {
 
 		toadlets = new ArrayList<Toadlet>(listed);
 		toadlets.addAll(unlisted);
->>>>>>> master
 	}
 
 	/**

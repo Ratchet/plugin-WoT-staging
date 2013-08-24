@@ -47,14 +47,18 @@ public class ConfigurationPage extends WebPageImpl {
 		
 			if(config.getInt("standby")==0) {
 				newStandby = 1;
+				synchronized(config) {
+					config.set("standby", newStandby); //do this before mFetcher.startStandbyMode() now, in case that keeps hanging
+					config.storeAndCommit();
+				}
 				mFetcher.startStandbyMode();
 			} else {
 				newStandby = 0;
+				synchronized(config) {
+					config.set("standby", newStandby); //do this before mFetcher.stopStandbyMode() now, in case that keeps hanging
+					config.storeAndCommit();
+				}
 				mFetcher.stopStandbyMode();
-			}
-			synchronized(config) {
-				config.set("standby", newStandby);
-				config.storeAndCommit();
 			}
 		}
 		synchronized(config) {
