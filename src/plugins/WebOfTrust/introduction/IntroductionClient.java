@@ -72,9 +72,8 @@ public final class IntroductionClient extends TransferThread  {
 	
 	/**
 	 * The amount of concurrent puzzle requests to aim for.
-	 * TODO: Decrease to 10 as soon as there are enough identities in the WoT
 	 */
-	public static final int PUZZLE_REQUEST_COUNT = 20;
+	public static final int PUZZLE_REQUEST_COUNT = 10;
 	
 	/** How many unsolved puzzles do we try to accumulate? */
 	public static final int PUZZLE_POOL_SIZE = 40;
@@ -283,6 +282,15 @@ public final class IntroductionClient extends TransferThread  {
 			return;
 		}
 		
+		/*
+		 * We do not stop fetching new puzzles once the puzzle pool is full by purpose:
+		 * We want the available puzzles to be as new as possible so there is a high chance of the inserter of them still being online.
+		 * This decrease the latency of the solution arriving at the inserter and therefore speeds up introduction.
+		 * (Notice: If the puzzle pool contains an amount of PUZZLE_POOL_SIZE puzzles already and new fetches finish,
+		 * the oldest puzzles will be deleted automatically. So the pool won't grow beyond the size limit.)
+		 */
+		// if(mPuzzleStore.getNonOwnCaptchaAmount(false) >= PUZZLE_POOL_SIZE) return; 
+		
 		Logger.normal(this, "Trying to start more fetches, current amount: " + fetchCount);
 		
 		final int newRequestCount = PUZZLE_REQUEST_COUNT - fetchCount;
@@ -468,6 +476,7 @@ public final class IntroductionClient extends TransferThread  {
 		
 		final FreenetURI uri = IntroductionPuzzle.generateRequestURI(inserter, currentDate, index);		
 		final FetchContext fetchContext = mClient.getFetchContext();
+		fetchContext.maxArchiveLevels = 0; // Because archives can become huge and WOT does not use them, we should disallow them. See JavaDoc of the variable.
 		// The retry-count does not include the first attempt. We only try once because we do not know whether that identity was online to insert puzzles today.
 		fetchContext.maxSplitfileBlockRetries = 0;
 		fetchContext.maxNonSplitfileRetries = 0;

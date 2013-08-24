@@ -12,6 +12,8 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.Random;
 
+import plugins.WebOfTrust.Identity.FetchState;
+import plugins.WebOfTrust.Identity.IdentityID;
 import plugins.WebOfTrust.Score.ScoreID;
 import plugins.WebOfTrust.Trust.TrustID;
 import plugins.WebOfTrust.exceptions.DuplicateIdentityException;
@@ -55,6 +57,7 @@ import freenet.pluginmanager.PluginReplySender;
 import freenet.pluginmanager.PluginRespirator;
 import freenet.support.CurrentTimeUTC;
 import freenet.support.Logger;
+import freenet.support.Logger.LogLevel;
 import freenet.support.SimpleFieldSet;
 import freenet.support.SizeUtil;
 import freenet.support.api.Bucket;
@@ -93,11 +96,11 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * the Freenet development team provides a list of seed identities - each of them is one of the developers.
 	 */
 	private static final String[] SEED_IDENTITIES = new String[] { 
-		"USK@QeTBVWTwBldfI-lrF~xf0nqFVDdQoSUghT~PvhyJ1NE,OjEywGD063La2H-IihD7iYtZm3rC0BP6UTvvwyF5Zh4,AQACAAE/WebOfTrust/90", // xor
-		"USK@z9dv7wqsxIBCiFLW7VijMGXD9Gl-EXAqBAwzQ4aq26s,4Uvc~Fjw3i9toGeQuBkDARUV5mF7OTKoAhqOA9LpNdo,AQACAAE/WebOfTrust/60", // Toad
-		"USK@o2~q8EMoBkCNEgzLUL97hLPdddco9ix1oAnEa~VzZtg,X~vTpL2LSyKvwQoYBx~eleI2RF6QzYJpzuenfcKDKBM,AQACAAE/WebOfTrust/0", // Bombe
-		"USK@cI~w2hrvvyUa1E6PhJ9j5cCoG1xmxSooi7Nez4V2Gd4,A3ArC3rrJBHgAJV~LlwY9kgxM8kUR2pVYXbhGFtid78,AQACAAE/WebOfTrust/19", // TheSeeker
-		"USK@D3MrAR-AVMqKJRjXnpKW2guW9z1mw5GZ9BB15mYVkVc,xgddjFHx2S~5U6PeFkwqO5V~1gZngFLoM-xaoMKSBI8,AQACAAE/WebOfTrust/47", // zidel
+		"USK@QeTBVWTwBldfI-lrF~xf0nqFVDdQoSUghT~PvhyJ1NE,OjEywGD063La2H-IihD7iYtZm3rC0BP6UTvvwyF5Zh4,AQACAAE/WebOfTrust/1344", // xor
+		"USK@z9dv7wqsxIBCiFLW7VijMGXD9Gl-EXAqBAwzQ4aq26s,4Uvc~Fjw3i9toGeQuBkDARUV5mF7OTKoAhqOA9LpNdo,AQACAAE/WebOfTrust/1270", // Toad
+		"USK@o2~q8EMoBkCNEgzLUL97hLPdddco9ix1oAnEa~VzZtg,X~vTpL2LSyKvwQoYBx~eleI2RF6QzYJpzuenfcKDKBM,AQACAAE/WebOfTrust/9379", // Bombe
+		// "USK@cI~w2hrvvyUa1E6PhJ9j5cCoG1xmxSooi7Nez4V2Gd4,A3ArC3rrJBHgAJV~LlwY9kgxM8kUR2pVYXbhGFtid78,AQACAAE/WebOfTrust/19", // TheSeeker. Disabled because he is using LCWoT and it does not support identity introduction ATM.
+		"USK@D3MrAR-AVMqKJRjXnpKW2guW9z1mw5GZ9BB15mYVkVc,xgddjFHx2S~5U6PeFkwqO5V~1gZngFLoM-xaoMKSBI8,AQACAAE/WebOfTrust/4959", // zidel
 	};
 
 	/* References from the node */
@@ -177,7 +180,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 
 	public void runPlugin(PluginRespirator myPR) {
 		try {
-			Logger.normal(this, "Web Of Trust plugin starting up...");
+			Logger.normal(this, "Web Of Trust plugin version " + Version.getMarketingVersion() + " starting up...");
 			
 			/* Catpcha generation needs headless mode on linux */
 			System.setProperty("java.awt.headless", "true"); 
@@ -196,7 +199,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 			
 			mPuzzleStore = new IntroductionPuzzleStore(this);
 			
-			upgradeDB();
+			upgradeDB(); // Please ensure that no threads are using the IntroductionPuzzleStore / IdentityFetcher while this is executing.
 			
 			mXMLTransformer = new XMLTransformer(this);
 			
@@ -350,7 +353,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
         	// them only for the classes where we need them does not cause any harm.
         	classHasIndex = true;
         	
-        	if(logDEBUG) Logger.debug(this, "Peristent class: " + clazz.getCanonicalName() + "; hasIndex==" + classHasIndex);
+        	if(logDEBUG) Logger.debug(this, "Persistent class: " + clazz.getCanonicalName() + "; hasIndex==" + classHasIndex);
         	
         	// TODO: Make very sure that it has no negative side effects if we disable class indices for some classes
         	// Maybe benchmark in comparison to a database which has class indices enabled for ALL classes.
@@ -523,6 +526,11 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		return Db4o.openFile(getNewDatabaseConfiguration(), file.getAbsolutePath()).ext();
 	}
 	
+	/**
+	 * ATTENTION: Please ensure that no threads are using the IntroductionPuzzleStore / IdentityFetcher while this is executing.
+	 * It doesn't synchronize on the IntroductionPuzzleStore and IdentityFetcher because it assumes that they are not being used yet.
+	 * (I didn't upgrade this function to do the locking because it would be much work to test the changes for little benefit)  
+	 */
 	@SuppressWarnings("deprecation")
 	private synchronized void upgradeDB() {
 		int databaseVersion = mConfig.getDatabaseFormatVersion();
@@ -536,6 +544,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 			Logger.normal(this, "Upgrading database version " + databaseVersion);
 			
 			//synchronized(this) { // Already done at function level
+			//synchronized(mPuzzleStore) { // Normally would be needed for deleteWithoutCommit(Identity) but IntroductionClient/Server are not running yet
+			//synchronized(mFetcher) { // Normally would be needed for deleteWithoutCommit(Identity) but the IdentityFetcher is not running yet
 				synchronized(Persistent.transactionLock(mDB)) {
 					try {
 						Logger.normal(this, "Generating Score IDs...");
@@ -578,6 +588,81 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		if(databaseVersion != WebOfTrust.DATABASE_FORMAT_VERSION)
 			throw new RuntimeException("Your database is too outdated to be upgraded automatically, please create a new one by deleting " 
 					+ DATABASE_FILENAME + ". Contact the developers if you really need your old data.");
+	}
+	
+	/**
+	 * DO NOT USE THIS FUNCTION ON A DATABASE WHICH YOU WANT TO CONTINUE TO USE!
+	 * 
+	 * Debug function for finding object leaks in the database.
+	 * 
+	 * - Deletes all identities in the database - This should delete ALL objects in the database.
+	 * - Then it checks for whether any objects still exist - those are leaks.
+	 */
+	private synchronized void checkForDatabaseLeaks() {
+		Logger.normal(this, "Checking for database leaks... This will delete all identities!");
+		 
+		{
+			Logger.debug(this, "Checking FetchState leakage...");
+			
+			final Query query = mDB.query();
+			query.constrain(FetchState.class);
+			@SuppressWarnings("unchecked")
+			ObjectSet<FetchState> result = (ObjectSet<FetchState>)query.execute();
+			
+			for(FetchState state : result) {
+				Logger.debug(this, "Checking " + state);
+				
+				final Query query2 = mDB.query();
+				query2.constrain(Identity.class);
+				query.descend("mCurrentEditionFetchState").constrain(state).identity();
+				@SuppressWarnings("unchecked")
+				ObjectSet<FetchState> result2 = (ObjectSet<FetchState>)query.execute();
+				
+				switch(result2.size()) {
+					case 0:
+						Logger.error(this, "Found leaked FetchState!");
+						break;
+					case 1:
+						break;
+					default:
+						Logger.error(this, "Found re-used FetchState, count: " + result2.size());
+						break;
+				}
+			}
+			
+			Logger.debug(this, "Finished checking FetchState leakage, amount:" + result.size());
+		}
+		
+		
+		Logger.normal(this, "Deleting ALL identities...");
+		synchronized(mPuzzleStore) {
+		synchronized(mFetcher) {
+		synchronized(Persistent.transactionLock(mDB)) {
+			try {
+				beginTrustListImport();
+				for(Identity identity : getAllIdentities()) {
+					deleteWithoutCommit(identity);
+				}
+				finishTrustListImport();
+				Persistent.checkedCommit(mDB, this);
+			} catch(RuntimeException e) {
+				Persistent.checkedRollbackAndThrow(mDB, this, e);
+			}
+		}
+		}
+		}
+		Logger.normal(this, "Deleting ALL identities finished.");
+		
+		Query query = mDB.query();
+		query.constrain(Object.class);
+		@SuppressWarnings("unchecked")
+		ObjectSet<Object> result = query.execute();
+
+		for(Object leak : result) {
+			Logger.error(this, "Found leaked object: " + leak);
+		}
+		
+		Logger.warning(this, "Finished checking for database leaks. This database is empty now, delete it.");
 	}
 	
 	private synchronized boolean verifyDatabaseIntegrity() {
@@ -779,7 +864,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * Incorrect scores are corrected & stored.
 	 * The function is synchronized and does a transaction, no outer synchronization is needed. 
 	 */
-	private synchronized void verifyAndCorrectStoredScores() {
+	protected synchronized void verifyAndCorrectStoredScores() {
 		Logger.normal(this, "Veriying all stored scores ...");
 		synchronized(Persistent.transactionLock(mDB)) {
 			try {
@@ -796,6 +881,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * Debug function for deleting duplicate identities etc. which might have been created due to bugs :)
 	 */
 	private synchronized void deleteDuplicateObjects() {
+		synchronized(mPuzzleStore) { // Needed for deleteIdentity()
+		synchronized(mFetcher) { // // Needed for deleteIdentity()
 		synchronized(Persistent.transactionLock(mDB)) {
 		try {
 			HashSet<String> deleted = new HashSet<String>();
@@ -811,7 +898,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 				for(Identity duplicate : duplicates) {
 					if(deleted.contains(duplicate.getID()) == false) {
 						Logger.error(duplicate, "Deleting duplicate identity " + duplicate.getRequestURI());
-						deleteIdentity(duplicate);
+						deleteWithoutCommit(duplicate);
+						Persistent.checkedCommit(mDB, this);
 					}
 				}
 				deleted.add(identity.getID());
@@ -822,6 +910,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		}
 		catch(RuntimeException e) {
 			Persistent.checkedRollback(mDB, this, e);
+		}
+		}
 		}
 		}
 
@@ -1063,7 +1153,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * @return True if all stored scores were correct. False if there were any errors in stored scores.
 	 */
 	protected synchronized boolean computeAllScoresWithoutCommit() {
-		if(logMINOR) Logger.debug(this, "Doing a full computation of all Scores...");
+		if(logMINOR) Logger.minor(this, "Doing a full computation of all Scores...");
 		
 		final long beginTime = CurrentTimeUTC.getInMillis();
 		
@@ -1149,7 +1239,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 								// If we found a rank less than infinite we can overwrite the old rank with this one, but only if the infinite rank was not
 								// given by the tree owner.
 								try {
-									getTrust(treeOwner, trustee);
+									final Trust treeOwnerTrust = getTrust(treeOwner, trustee);
+									assert(treeOwnerTrust.getValue() <= 0); // TODO: Is this correct?
 								} catch(NotTrustedException e) {
 									if(trust.getValue() > 0) {
 										rankValues.put(trustee, trusteeRank);
@@ -1285,7 +1376,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		mFullScoreRecomputationMilliseconds += CurrentTimeUTC.getInMillis() - beginTime;
 		
 		if(logMINOR) {
-			Logger.debug(this, "Full score computation finished. Amount: " + mFullScoreRecomputationCount + "; Avg Time:" + getAverageFullScoreRecomputationTime() + "s");
+			Logger.minor(this, "Full score computation finished. Amount: " + mFullScoreRecomputationCount + "; Avg Time:" + getAverageFullScoreRecomputationTime() + "s");
 		}
 		
 		return returnValue;
@@ -1451,7 +1542,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * @throws UnknownIdentityException if there is no identity with this id in the database
 	 */
 	public Identity getIdentityByURI(FreenetURI uri) throws UnknownIdentityException {
-		return getIdentityByID(Identity.getIDFromURI(uri));
+		return getIdentityByID(IdentityID.constructAndValidateFromURI(uri).toString());
 	}
 
 	/**
@@ -1475,7 +1566,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * @throws UnknownIdentityException if the OwnIdentity isn't in the database
 	 */
 	public OwnIdentity getOwnIdentityByURI(FreenetURI uri) throws UnknownIdentityException {
-		return getOwnIdentityByID(OwnIdentity.getIDFromURI(uri));
+		return getOwnIdentityByID(IdentityID.constructAndValidateFromURI(uri).toString());
 	}
 
 	/**
@@ -1607,12 +1698,32 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	}
 
 	
-	/**
-	 * You have to lock the WoT and the IntroductionPuzzleStore before calling this function.
-	 * @param identity
+	/** 
+	 * DO NOT USE THIS FUNCTION FOR DELETING OWN IDENTITIES UPON USER REQUEST!
+	 * IN FACT BE VERY CAREFUL WHEN USING IT FOR ANYTHING FOR THE FOLLOWING REASONS:
+	 * - This function deletes ALL given and received trust values of the given identity. This modifies the trust list of the trusters against their will.
+	 * - Especially it might be an information leak if the trust values of other OwnIdentities are deleted!
+	 * - If WOT one day is designed to be used by many different users at once, the deletion of other OwnIdentity's trust values would even be corruption.
+	 * 
+	 * The intended purpose of this function is:
+	 * - To specify which objects have to be dealt with when messing with storage of an identity.
+	 * - To be able to do database object leakage tests: Many classes have a deleteWithoutCommit function and there are valid usecases for them.
+	 *   However, the implementations of those functions might cause leaks by forgetting to delete certain object members.
+	 *   If you call this function for ALL identities in a database, EVERYTHING should be deleted and the database SHOULD be empty.
+	 *   You then can check whether the database actually IS empty to test for leakage.
+	 * 
+	 * You have to lock the WebOfTrust, the IntroductionPuzzleStore and the IdentityFetcher before calling this function.
 	 */
 	private void deleteWithoutCommit(Identity identity) {
+		// We want to use beginTrustListImport, finishTrustListImport / abortTrustListImport.
+		// If the caller already handles that for us though, we should not call those function again.
+		// So we check whether the caller already started an import.
+		boolean trustListImportWasInProgress = mTrustListImportInProgress;
+		
 		try {
+			if(!trustListImportWasInProgress)
+				beginTrustListImport();
+			
 			if(logDEBUG) Logger.debug(this, "Deleting identity " + identity + " ...");
 			
 			if(logDEBUG) Logger.debug(this, "Deleting received scores...");
@@ -1636,20 +1747,32 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 				// We call computeAllScores anyway so we do not use removeTrustWithoutCommit()
 			}
 			
-			computeAllScoresWithoutCommit();
+			mFullScoreComputationNeeded = true; // finishTrustListImport will call computeAllScoresWithoutCommit for us.
 
 			if(logDEBUG) Logger.debug(this, "Deleting associated introduction puzzles ...");
 			mPuzzleStore.onIdentityDeletion(identity);
 			
 			if(logDEBUG) Logger.debug(this, "Storing an abort-fetch-command...");
 			
-			if(mFetcher != null) // Can be null if we use this function in upgradeDB()
+			if(mFetcher != null) { // Can be null if we use this function in upgradeDB()
 				mFetcher.storeAbortFetchCommandWithoutCommit(identity);
-
+				// NOTICE:
+				// If the fetcher did store a db4o object reference to the identity, we would have to trigger command processing
+				// now to prevent leakage of the identity object.
+				// But the fetcher does NOT store a db4o object reference to the given identity. It stores its ID as String only.
+				// Therefore, it is OK that the fetcher does not immediately process the commands now.
+			}
+		
 			if(logDEBUG) Logger.debug(this, "Deleting the identity...");
 			identity.deleteWithoutCommit();
+			
+			if(!trustListImportWasInProgress)
+				finishTrustListImport();
 		}
 		catch(RuntimeException e) {
+			if(!trustListImportWasInProgress)
+				abortTrustListImport(e);
+			
 			Persistent.checkedRollbackAndThrow(mDB, this, e);
 		}
 	}
@@ -1956,9 +2079,11 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * It creates or updates an existing Trust object and make the trustee compute its {@link Score}.
 	 * 
 	 * This function does neither lock the database nor commit the transaction. You have to surround it with
+	 * synchronized(WebOfTrust.this) {
 	 * synchronized(Persistent.transactionLock(mDB)) {
 	 *     try { ... setTrustWithoutCommit(...); mDB.commit(); }
 	 *     catch(RuntimeException e) { System.gc(); mDB.rollback(); throw e; }
+	 * }
 	 * }
 	 * 
 	 * @param truster The Identity that gives the trust
@@ -1967,7 +2092,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * @param newComment A comment to explain the given value
 	 * @throws InvalidParameterException if a given parameter isn't valid, see {@link Trust} for details on accepted values.
 	 */
-	protected synchronized void setTrustWithoutCommit(Identity truster, Identity trustee, byte newValue, String newComment)
+	protected void setTrustWithoutCommit(Identity truster, Identity trustee, byte newValue, String newComment)
 		throws InvalidParameterException {
 		
 		try { // Check if we are updating an existing trust value
@@ -2080,7 +2205,7 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	private synchronized void initTrustTreeWithoutCommit(OwnIdentity identity) throws DuplicateScoreException {
 		try {
 			getScore(identity, identity);
-			Logger.error(this, "initTrusTree called even though there is already one for " + identity);
+			Logger.error(this, "initTrustTreeWithoutCommit called even though there is already one for " + identity);
 			return;
 		} catch (NotInTrustTreeException e) {
 			final Score score = new Score(this, identity, identity, Integer.MAX_VALUE, 0, 100);
@@ -2190,6 +2315,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * You MUST create a database transaction by synchronizing on Persistent.transactionLock(db).
 	 */
 	protected void beginTrustListImport() {
+		if(logMINOR) Logger.minor(this, "beginTrustListImport()");
+		
 		if(mTrustListImportInProgress) {
 			abortTrustListImport(new RuntimeException("There was already a trust list import in progress!"));
 			mFullScoreComputationNeeded = true;
@@ -2206,13 +2333,29 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * See {@link beginTrustListImport} for an explanation of the purpose of this function.
 	 * 
 	 * Aborts the import of a trust list and rolls back the current transaction.
+	 * 
+	 * @param e The exception which triggered the abort. Will be logged to the Freenet log file.
+	 * @param logLevel The {@link LogLevel} to use when logging the abort to the Freenet log file.
 	 */
-	protected void abortTrustListImport(Exception e) {
+	protected void abortTrustListImport(Exception e, LogLevel logLevel) {
+		if(logMINOR) Logger.minor(this, "abortTrustListImport()");
+		
 		assert(mTrustListImportInProgress);
 		mTrustListImportInProgress = false;
 		mFullScoreComputationNeeded = false;
-		Persistent.checkedRollback(mDB, this, e);
+		Persistent.checkedRollback(mDB, this, e, logLevel);
 		assert(computeAllScoresWithoutCommit()); // Test rollback.
+	}
+	
+	/**
+	 * See {@link beginTrustListImport} for an explanation of the purpose of this function.
+	 * 
+	 * Aborts the import of a trust list and rolls back the current transaction.
+	 * 
+	 * @param e The exception which triggered the abort. Will be logged to the Freenet log file with log level {@link LogLevel.ERROR}
+	 */
+	protected void abortTrustListImport(Exception e) {
+		abortTrustListImport(e, Logger.LogLevel.ERROR);
 	}
 	
 	/**
@@ -2223,6 +2366,8 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 	 * Does NOT commit the transaction, you must do this.
 	 */
 	protected void finishTrustListImport() {
+		if(logMINOR) Logger.minor(this, "finishTrustListImport()");
+		
 		if(!mTrustListImportInProgress) {
 			Logger.error(this, "There was no trust list import in progress!");
 			return;
@@ -2462,48 +2607,29 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 		return identity;
 	}
 	
-	public synchronized void deleteIdentity(Identity identity) {
-		synchronized(mPuzzleStore) {
-		synchronized(Persistent.transactionLock(mDB)) {
-			try {
-				deleteWithoutCommit(identity);
-				Persistent.checkedCommit(mDB, this);
-			}
-			catch(RuntimeException e) {
-				Persistent.checkedRollbackAndThrow(mDB, this, e);
-			}
-		}
-		}
-	}
-	
-	public synchronized void deleteIdentity(String id) throws UnknownIdentityException {
-		deleteIdentity(getIdentityByID(id));
-	}
-	
 	public OwnIdentity createOwnIdentity(String nickName, boolean publishTrustList, String context)
 		throws MalformedURLException, InvalidParameterException {
 		
 		FreenetURI[] keypair = getPluginRespirator().getHLSimpleClient().generateKeyPair(WOT_NAME);
-		return createOwnIdentity(keypair[0].toString(), keypair[1].toString(), nickName, publishTrustList, context);
+		return createOwnIdentity(keypair[0], nickName, publishTrustList, context);
 	}
 
 	/**
 	 * @param context A context with which you want to use the identity. Null if you want to add it later.
 	 */
-	public synchronized OwnIdentity createOwnIdentity(String insertURI, String requestURI, String nickName,
+	public synchronized OwnIdentity createOwnIdentity(FreenetURI insertURI, String nickName,
 			boolean publishTrustList, String context) throws MalformedURLException, InvalidParameterException {
 		
 		synchronized(Persistent.transactionLock(mDB)) {
 			OwnIdentity identity;
 			
 			try {
-				identity = getOwnIdentityByURI(requestURI);
-				if(logDEBUG) Logger.debug(this, "Tried to create an own identity with an already existing request URI.");
+				identity = getOwnIdentityByURI(insertURI);
 				throw new InvalidParameterException("The URI you specified is already used by the own identity " +
 						identity.getNickname() + ".");
 			}
 			catch(UnknownIdentityException uie) {
-				identity = new OwnIdentity(this, new FreenetURI(insertURI), new FreenetURI(requestURI), nickName, publishTrustList);
+				identity = new OwnIdentity(this, insertURI, nickName, publishTrustList);
 				
 				if(context != null)
 					identity.addContext(context);
@@ -2546,95 +2672,310 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 			}
 		}
 	}
-
-	public synchronized void restoreIdentity(String requestURI, String insertURI) throws MalformedURLException, InvalidParameterException {
-		OwnIdentity identity;
+	
+	/**
+	 * This "deletes" an {@link OwnIdentity} by replacing it with an {@link Identity}.
+	 * 
+	 * The {@link OwnIdentity} is not deleted because this would be a security issue:
+	 * If other {@link OwnIdentity}s have assigned a trust value to it, the trust value would be gone if there is no {@link Identity} object to be the target
+	 * 
+	 * @param id The {@link Identity.IdentityID} of the identity.
+	 * @throws UnknownIdentityException If there is no {@link OwnIdentity} with the given ID. Also thrown if a non-own identity exists with the given ID.
+	 */
+	public synchronized void deleteOwnIdentity(String id) throws UnknownIdentityException {
+		Logger.normal(this, "deleteOwnIdentity(): Starting... ");
+		
 		synchronized(mPuzzleStore) {
+		synchronized(mFetcher) {
 		synchronized(Persistent.transactionLock(mDB)) {
+			final OwnIdentity oldIdentity = getOwnIdentityByID(id);
+			
 			try {
-				FreenetURI requestFreenetURI = new FreenetURI(requestURI);
-				FreenetURI insertFreenetURI = new FreenetURI(insertURI);
-				
-				if(requestFreenetURI.isSSKForUSK()) requestFreenetURI = requestFreenetURI.uskForSSK();
-				if(insertFreenetURI.isSSKForUSK()) insertFreenetURI = insertFreenetURI.uskForSSK();
-				
-				long edition = Math.max(requestFreenetURI.getEdition(), insertFreenetURI.getEdition());
+				Logger.normal(this, "Deleting an OwnIdentity by converting it to a non-own Identity: " + oldIdentity);
+
+				// We don't need any score computations to happen (explanation will follow below) so we don't need the following: 
+				/* beginTrustListImport(); */
+
+				// This function messes with the score graph manually so it is a good idea to check whether it is intact before and afterwards.
+				assert(computeAllScoresWithoutCommit());
+
+				final Identity newIdentity;
 				
 				try {
-					Identity old = getIdentityByURI(requestURI);
+					newIdentity = new Identity(this, oldIdentity.getRequestURI(), oldIdentity.getNickname(), oldIdentity.doesPublishTrustList());
+				} catch(MalformedURLException e) { // The data was taken from the OwnIdentity so this shouldn't happen
+					throw new RuntimeException(e);
+				} catch (InvalidParameterException e) { // The data was taken from the OwnIdentity so this shouldn't happen
+					throw new RuntimeException(e);
+				}
+				
+				newIdentity.setContexts(oldIdentity.getContexts());
+				newIdentity.setProperties(oldIdentity.getProperties());
+				
+				try {
+					newIdentity.setEdition(oldIdentity.getEdition());
+				} catch (InvalidParameterException e) { // The data was taken from old identity so this shouldn't happen
+					throw new RuntimeException(e);
+				}
+				
+				// In theory we do not need to re-fetch the current trust list edition:
+				// The trust list of an own identity is always stored completely in the database, i.e. all trustees exist.
+				// HOWEVER if the user had used the restoreOwnIdentity feature and then used this function, it might be the case that
+				// the current edition of the old OwndIdentity was not fetched yet.
+				// So we set the fetch state to FetchState.Fetched if the oldIdentity's fetch state was like that as well.
+				if(oldIdentity.getCurrentEditionFetchState() == FetchState.Fetched) {
+					newIdentity.onFetched(oldIdentity.getLastFetchedDate());
+				}
+				// An else to set the fetch state to FetchState.NotFetched is not necessary, newIdentity.setEdition() did that already.
+
+				newIdentity.storeWithoutCommit();
+
+				// Copy all received trusts.
+				// We don't have to modify them because they are user-assigned values and the assignment
+				// of the user does not change just because the type of the identity changes.
+				for(Trust oldReceivedTrust : getReceivedTrusts(oldIdentity)) {
+					Trust newReceivedTrust;
+					try {
+						newReceivedTrust = new Trust(this, oldReceivedTrust.getTruster(), newIdentity,
+								oldReceivedTrust.getValue(), oldReceivedTrust.getComment());
+					} catch (InvalidParameterException e) { // The data was taken from the old Trust so this shouldn't happen
+						throw new RuntimeException(e);
+					}
+
+					// The following assert() cannot be added because it would always fail:
+					// It would implicitly trigger oldIdentity.equals(identity) which is not the case:
+					// Certain member values such as the edition might not be equal.
+					/* assert(newReceivedTrust.equals(oldReceivedTrust)); */
+
+					oldReceivedTrust.deleteWithoutCommit();
+					newReceivedTrust.storeWithoutCommit();
+				}
+
+				assert(getReceivedTrusts(oldIdentity).size() == 0);
+
+				// Copy all received scores.
+				// We don't have to modify them because the rating of the identity from the perspective of a
+				// different own identity should NOT be dependent upon whether it is an own identity or not.
+				for(Score oldScore : getScores(oldIdentity)) {
+					Score newScore = new Score(this, oldScore.getTruster(), newIdentity, oldScore.getScore(),
+							oldScore.getRank(), oldScore.getCapacity());
+
+					// The following assert() cannot be added because it would always fail:
+					// It would implicitly trigger oldIdentity.equals(identity) which is not the case:
+					// Certain member values such as the edition might not be equal.
+					/* assert(newScore.equals(oldScore)); */
+
+					oldScore.deleteWithoutCommit();
+					newScore.storeWithoutCommit();
+				}
+
+				assert(getScores(oldIdentity).size() == 0);
+
+				// Delete all given scores:
+				// Non-own identities do not assign scores to other identities so we can just delete them.
+				for(Score oldScore : getGivenScores(oldIdentity)) {
+					final Identity trustee = oldScore.getTrustee();
+					final boolean oldShouldFetchTrustee = shouldFetchIdentity(trustee);
 					
-					if(old instanceof OwnIdentity)
+					oldScore.deleteWithoutCommit();
+					
+					// If the OwnIdentity which we are converting was the only source of trust to the trustee
+					// of this Score value, the should-fetch state of the trustee might change to false.
+					if(oldShouldFetchTrustee && shouldFetchIdentity(trustee) == false) {
+						mFetcher.storeAbortFetchCommandWithoutCommit(trustee);
+					}
+				}
+				
+				assert(getGivenScores(oldIdentity).size() == 0);
+
+				// Copy all given trusts:
+				// We don't have to use the removeTrust/setTrust functions because the score graph does not need updating:
+				// - To the rating of the converted identity in the score graphs of other own identities it is irrelevant
+				//   whether it is an own identity or not. The rating should never depend on whether it is an own identity!
+				// - Non-own identities do not have a score graph. So the score graph of the converted identity is deleted
+				//   completely and therefore it does not need to be updated.
+				for(Trust oldGivenTrust : getGivenTrusts(oldIdentity)) {
+					Trust newGivenTrust;
+					try {
+						newGivenTrust = new Trust(this, newIdentity, oldGivenTrust.getTrustee(),
+								oldGivenTrust.getValue(), oldGivenTrust.getComment());
+					} catch (InvalidParameterException e) { // The data was taken from the old Trust so this shouldn't happen
+						throw new RuntimeException(e);
+					}
+
+					// The following assert() cannot be added because it would always fail:
+					// It would implicitly trigger oldIdentity.equals(identity) which is not the case:
+					// Certain member values such as the edition might not be equal.
+					/* assert(newGivenTrust.equals(oldGivenTrust)); */
+
+					oldGivenTrust.deleteWithoutCommit();
+					newGivenTrust.storeWithoutCommit();
+				}
+
+				mPuzzleStore.onIdentityDeletion(oldIdentity);
+				mFetcher.storeAbortFetchCommandWithoutCommit(oldIdentity);
+				// NOTICE:
+				// If the fetcher did store a db4o object reference to the identity, we would have to trigger command processing
+				// now to prevent leakage of the identity object.
+				// But the fetcher does NOT store a db4o object reference to the given identity. It stores its ID as String only.
+				// Therefore, it is OK that the fetcher does not immediately process the commands now.
+
+				oldIdentity.deleteWithoutCommit();
+
+				mFetcher.storeStartFetchCommandWithoutCommit(newIdentity);
+
+				// This function messes with the score graph manually so it is a good idea to check whether it is intact before and afterwards.
+				assert(computeAllScoresWithoutCommit());
+
+				Persistent.checkedCommit(mDB, this);
+			}
+			catch(RuntimeException e) {
+				Persistent.checkedRollbackAndThrow(mDB, this, e);
+			}
+		}
+		}
+		}
+		
+		Logger.normal(this, "deleteOwnIdentity(): Finished.");
+	}
+
+	/**
+	 * NOTICE: When changing this function, please also take care of {@link OwnIdentity.isRestoreInProgress()}
+	 */
+	public synchronized void restoreOwnIdentity(FreenetURI insertFreenetURI) throws MalformedURLException, InvalidParameterException {
+		Logger.normal(this, "restoreOwnIdentity(): Starting... ");
+		
+		OwnIdentity identity;
+		
+		synchronized(mPuzzleStore) {
+		synchronized(mFetcher) {
+		synchronized(Persistent.transactionLock(mDB)) {
+			try {
+				long edition = 0;
+				
+				try {
+					edition = Math.max(edition, insertFreenetURI.getEdition());
+				} catch(IllegalStateException e) {
+					// The user supplied URI did not have an edition specified
+				}
+				
+				try { // Try replacing an existing non-own version of the identity with an OwnIdentity
+					Identity oldIdentity = getIdentityByURI(insertFreenetURI);
+					
+					if(oldIdentity instanceof OwnIdentity)
 						throw new InvalidParameterException("There is already an own identity with the given URI pair.");
 					
-					edition = Math.max(old.getEdition(), edition);
+					Logger.normal(this, "Restoring an already known identity from Freenet: " + oldIdentity);
+					
+					// Normally, one would expect beginTrustListImport() to happen close to the actual trust list changes later on in this function.
+					// But beginTrustListImport() contains an assert(computeAllScoresWithoutCommit()) and that call to the score computation reference
+					// implementation will fail if two identities with the same ID exist.
+					// This would be the case later on - we cannot delete the non-own version of the OwnIdentity before we modified the trust graph
+					// but we must also store the own version to be able to modify the trust graph.
+					beginTrustListImport();
 					
 					// We already have fetched this identity as a stranger's one. We need to update the database.
-					identity = new OwnIdentity(this, insertFreenetURI, requestFreenetURI, old.getNickname(), old.doesPublishTrustList());
-					/* We re-fetch the current edition to make sure all trustees are imported */
-					identity.restoreEdition(edition);
+					identity = new OwnIdentity(this, insertFreenetURI, oldIdentity.getNickname(), oldIdentity.doesPublishTrustList());
+					
+					/* We re-fetch the most recent edition to make sure all trustees are imported */
+					edition = Math.max(edition, oldIdentity.getEdition());
+					identity.restoreEdition(edition, oldIdentity.getLastFetchedDate());
 				
-					identity.setContexts(old.getContexts());
-					identity.setProperties(old.getProperties());
+					identity.setContexts(oldIdentity.getContexts());
+					identity.setProperties(oldIdentity.getProperties());
 					
 					identity.storeWithoutCommit();
 					initTrustTreeWithoutCommit(identity);
 	
-					// Update all received trusts
-					for(Trust oldReceivedTrust : getReceivedTrusts(old)) {
+					// Copy all received trusts.
+					// We don't have to modify them because they are user-assigned values and the assignment
+					// of the user does not change just because the type of the identity changes.
+					for(Trust oldReceivedTrust : getReceivedTrusts(oldIdentity)) {
 						Trust newReceivedTrust = new Trust(this, oldReceivedTrust.getTruster(), identity,
 								oldReceivedTrust.getValue(), oldReceivedTrust.getComment());
 						
+						// The following assert() cannot be added because it would always fail:
+						// It would implicitly trigger oldIdentity.equals(identity) which is not the case:
+						// Certain member values such as the edition might not be equal.
+						/* assert(newReceivedTrust.equals(oldReceivedTrust)); */
+						
+						oldReceivedTrust.deleteWithoutCommit();
 						newReceivedTrust.storeWithoutCommit();
 					}
+					
+					assert(getReceivedTrusts(oldIdentity).size() == 0);
 		
-					// Update all received scores
-					for(Score oldScore : getScores(old)) {
+					// Copy all received scores.
+					// We don't have to modify them because the rating of the identity from the perspective of a
+					// different own identity should NOT be dependent upon whether it is an own identity or not.
+					for(Score oldScore : getScores(oldIdentity)) {
 						Score newScore = new Score(this, oldScore.getTruster(), identity, oldScore.getScore(),
 								oldScore.getRank(), oldScore.getCapacity());
 						
+						// The following assert() cannot be added because it would always fail:
+						// It would implicitly trigger oldIdentity.equals(identity) which is not the case:
+						// Certain member values such as the edition might not be equal.
+						/* assert(newScore.equals(oldScore)); */
+						
+						oldScore.deleteWithoutCommit();
 						newScore.storeWithoutCommit();
 					}
 					
-					beginTrustListImport();
+					assert(getScores(oldIdentity).size() == 0);
+					
+					// What we do NOT have to deal with is the given scores of the old identity:
+					// Given scores do NOT exist for non-own identities, so there are no old ones to update.
+					// Of cause there WILL be scores because it is an own identity now.
+					// They will be created automatically when updating the given trusts
+					// - so thats what we will do now.
 					
 					// Update all given trusts
-					for(Trust givenTrust : getGivenTrusts(old)) {
-						// TODO: Deleting the trust object right here would save us N score recalculations for N trust objects and probably make
-						// restoreIdentity() almost twice as fast:
-						// deleteWithoutCommit() calls updateScoreWithoutCommit() per trust value, setTrustWithoutCommit() also does that
-						// However, the current approach of letting deleteWithoutCommit() do all the deletions is more clean. Therefore,
-						// we should introduce the db.delete(givenTrust)  hereonly after having a unit test for restoreIdentity().
+					for(Trust givenTrust : getGivenTrusts(oldIdentity)) {
+						// TODO: Instead of using the regular removeTrustWithoutCommit on all trust values, we could:
+						// - manually delete the old Trust objects from the database
+						// - manually store the new trust objects
+						// - Realize that only the trust graph of the restored identity needs to be updated and write an optimized version
+						// of setTrustWithoutCommit which deals with that.
+						// But before we do that, we should first do the existing possible optimization of removeTrustWithoutCommit:
+						// To get rid of removeTrustWithoutCommit always triggering a FULL score recomputation and instead make
+						// it only update the parts of the trust graph which are affected.
+						// Maybe the optimized version is fast enough that we don't have to do the optimization which this TODO suggests.
+						removeTrustWithoutCommit(givenTrust);
 						setTrustWithoutCommit(identity, givenTrust.getTrustee(), givenTrust.getValue(), givenTrust.getComment());
 					}
 					
-					finishTrustListImport();
+					// We do not call finishTrustListImport() now: It might trigger execution of computeAllScoresWithoutCommit
+					// which would re-create scores of the old identity. We later call it AFTER deleting the old identity.
+					/* finishTrustListImport(); */
 		
-					// Remove the old identity and all objects associated with it.
-					deleteWithoutCommit(old);
+					mPuzzleStore.onIdentityDeletion(oldIdentity);
+					mFetcher.storeAbortFetchCommandWithoutCommit(oldIdentity);
+					// NOTICE:
+					// If the fetcher did store a db4o object reference to the identity, we would have to trigger command processing
+					// now to prevent leakage of the identity object.
+					// But the fetcher does NOT store a db4o object reference to the given identity. It stores its ID as String only.
+					// Therefore, it is OK that the fetcher does not immediately process the commands now.
 					
-					if(logDEBUG) Logger.debug(this, "Successfully restored an already known identity from Freenet (" + identity.getNickname() + ")");
+					oldIdentity.deleteWithoutCommit();
 					
-				} catch (UnknownIdentityException e) {
-					identity = new OwnIdentity(this, new FreenetURI(insertURI), new FreenetURI(requestURI), null, false);
-					identity.restoreEdition(edition);
-					identity.updateLastInsertDate();
+					finishTrustListImport();
+				} catch (UnknownIdentityException e) { // The identity did NOT exist as non-own identity yet so we can just create an OwnIdentity and store it.
+					identity = new OwnIdentity(this, insertFreenetURI, null, false);
 					
-					// TODO: Instead of deciding by date whether the current edition was inserted, we should probably decide via a boolean.
+					Logger.normal(this, "Restoring not-yet-known identity from Freenet: " + identity);
+					
+					identity.restoreEdition(edition, null);
 					
 					// Store the new identity
 					identity.storeWithoutCommit();
 					initTrustTreeWithoutCommit(identity);
-					
-					if(logDEBUG) Logger.debug(this, "Successfully restored not-yet-known identity from Freenet (" + identity.getRequestURI() + ")");
 				}
 				
-				// This is not really necessary because OwnIdenity.needsInsert() returns false if currentEditionWasFetched() is false.
-				// However, we still do it because the user might have specified URIs with old edition numbers: Then the IdentityInserter would
-				// start insertion the old trust lists immediately after the first one was fetched. With the last insert date being set to current
-				// time, this is less likely to happen because the identity inserter has a minimal delay between last insert and next insert.
-				identity.updateLastInsertDate();
-				
 				mFetcher.storeStartFetchCommandWithoutCommit(identity);
+				
+				// This function messes with the trust graph manually so it is a good idea to check whether it is intact afterwards.
+				assert(computeAllScoresWithoutCommit());
+				
 				Persistent.checkedCommit(mDB, this);
 			}
 			catch(RuntimeException e) {
@@ -2643,6 +2984,9 @@ public class WebOfTrust implements FredPlugin, FredPluginThreadless, FredPluginF
 			}
 		}
 		}
+		}
+		
+		Logger.normal(this, "restoreOwnIdentity(): Finished.");
 	}
 
 	public synchronized void setTrust(String ownTrusterID, String trusteeID, byte value, String comment)

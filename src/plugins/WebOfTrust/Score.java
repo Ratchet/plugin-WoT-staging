@@ -101,8 +101,8 @@ public final class Score extends Persistent implements Cloneable {
 
 			final StringTokenizer tokenizer = new StringTokenizer(id, "@");
 
-			mTrusterID = IdentityID.constructAndValidate(tokenizer.nextToken()).toString();
-			mTrusteeID = IdentityID.constructAndValidate(tokenizer.nextToken()).toString();
+			mTrusterID = IdentityID.constructAndValidateFromString(tokenizer.nextToken()).toString();
+			mTrusteeID = IdentityID.constructAndValidateFromString(tokenizer.nextToken()).toString();
 
 			if(tokenizer.hasMoreTokens())
 				throw new IllegalArgumentException("Invalid MessageID: " + id);
@@ -163,6 +163,11 @@ public final class Score extends Persistent implements Cloneable {
 		setCapacity(myCapacity);
 		
 		// mLastChangedDate = CurrentTimeUTC.get(); <= setValue() etc do this already.
+	}
+	
+	@Override
+	public int hashCode() {
+		return getID().hashCode();
 	}
 	
 	@Override

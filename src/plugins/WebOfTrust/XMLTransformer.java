@@ -7,6 +7,7 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.MalformedURLException;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -337,7 +338,7 @@ public final class XMLTransformer {
 	 * 
 	 * @param xmlInputStream The input stream containing the XML.
 	 */
-	public void importIdentity(FreenetURI identityURI, InputStream xmlInputStream) throws Exception  {
+	public void importIdentity(FreenetURI identityURI, InputStream xmlInputStream) {
 		try { // Catch import problems so we can mark the edition as parsing failed
 		// We first parse the XML without synchronization, then do the synchronized import into the WebOfTrust		
 		final ParsedIdentityXML xmlData = parseIdentityXML(xmlInputStream);
@@ -377,21 +378,21 @@ public final class XMLTransformer {
 					}
 					catch(Exception e) {
 						/* Nickname changes are not allowed, ignore them... */
-						Logger.error(this, "setNickname() failed.", e);
+						Logger.warning(this, "setNickname() failed.", e);
 					}
 	
 					try { /* Failure of context importing should not make an identity disappear, therefore we catch exceptions. */
 						identity.setContexts(xmlData.identityContexts);
 					}
 					catch(Exception e) {
-						Logger.error(this, "setContexts() failed.", e);
+						Logger.warning(this, "setContexts() failed.", e);
 					}
 	
 					try { /* Failure of property importing should not make an identity disappear, therefore we catch exceptions. */
 						identity.setProperties(xmlData.identityProperties);
 					}
 					catch(Exception e) {
-						Logger.error(this, "setProperties() failed", e);
+						Logger.warning(this, "setProperties() failed", e);
 					}
 				
 					
@@ -404,7 +405,7 @@ public final class XMLTransformer {
 						boolean hasCapacity = false;
 						
 						// TODO: getBestScore/getBestCapacity should always yield a positive result because we store a positive score object for an OwnIdentity
-						// upon creation. The only case where it could not exist might be restoreIdentity() ... check that. If it is created there as well,
+						// upon creation. The only case where it could not exist might be restoreOwnIdentity() ... check that. If it is created there as well,
 						// remove the additional check here.
 						if(identity instanceof OwnIdentity) {
 							// Importing of OwnIdentities is always allowed
@@ -442,8 +443,14 @@ public final class XMLTransformer {
 							}
 							catch(UnknownIdentityException e) {
 								if(hasCapacity) { /* We only create trustees if the truster has capacity to rate them. */
-									trustee = new Identity(mWoT, trusteeURI, null, false);
-									trustee.storeWithoutCommit();
+									try {
+										trustee = new Identity(mWoT, trusteeURI, null, false);
+										trustee.storeWithoutCommit();
+									} catch(MalformedURLException urlEx) {
+										// Logging the exception does NOT log the actual malformed URL so we do it manually.
+										Logger.warning(this, "Received malformed identity URL: " + trusteeURI, urlEx);
+										throw urlEx;
+									}
 								}
 							}
 
@@ -473,7 +480,7 @@ public final class XMLTransformer {
 					identity.storeAndCommit();
 				}
 				catch(Exception e) { 
-					mWoT.abortTrustListImport(e); // Does the rollback
+					mWoT.abortTrustListImport(e, Logger.LogLevel.WARNING); // Does the rollback
 					throw e;
 				} // try
 			} // synchronized(Persistent.transactionLock(db))
@@ -490,20 +497,26 @@ public final class XMLTransformer {
 					final long newEdition = identityURI.getEdition();
 					if(identity.getEdition() <= newEdition) {
 						Logger.normal(this, "Marking edition as parsing failed: " + identityURI);
-						identity.setEdition(newEdition);
+						try {
+							identity.setEdition(newEdition);
+						} catch (InvalidParameterException e1) {
+							// Would only happen if newEdition < current edition.
+							// We have validated the opposite.
+							throw new RuntimeException(e1);
+						}
 						identity.onParsingFailed();
 						identity.storeAndCommit();
 					} else {
 						Logger.normal(this, "Not marking edition as parsing failed, we have already fetched a new one (" + 
 								identity.getEdition() + "):" + identityURI);
 					}
+					Logger.normal(this, "Parsing identity XML failed gracefully for " + identityURI, e);
 				}
 				catch(UnknownIdentityException uie) {
 					Logger.error(this, "Fetched an unknown identity: " + identityURI);
 				}	
 			}
 			}
-			throw e;
 		}
 	}
 
@@ -542,6 +555,9 @@ public final class XMLTransformer {
 	/**
 	 * Creates an identity from an identity introduction, stores it in the database and returns the new identity.
 	 * If the identity already exists, the existing identity is returned.
+	 * 
+	 * You have to synchronize on the WebOfTrust object when using this function!
+	 * TODO: Remove this requirement and re-query the parameter OwnIdentity puzzleOwner from the database after we are synchronized. 
 	 * 
 	 * @param xmlInputStream An InputStream which must not return more than {@link MAX_INTRODUCTION_BYTE_SIZE} bytes.
 	 * @throws InvalidParameterException If the XML format is unknown or if the puzzle owner does not allow introduction anymore.

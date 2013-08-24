@@ -87,9 +87,8 @@ public class Identity extends Persistent implements Cloneable {
 	
 	/* These booleans are used for preventing the construction of log-strings if logging is disabled (for saving some cpu cycles) */
 	
-	// We inherit them from class Persistent.
-	//private static transient volatile boolean logDEBUG = false;
-	//private static transient volatile boolean logMINOR = false;
+	private static transient volatile boolean logDEBUG = false;
+	private static transient volatile boolean logMINOR = false;
 	
 	static {
 		Logger.registerClass(Identity.class);
@@ -113,12 +112,17 @@ public class Identity extends Persistent implements Cloneable {
 		
 		private final String mID;
 		
+		/**
+		 * Constructs an identityID from the given String. This is the inverse of IdentityID.toString().
+		 * Checks whether the String matches the length limit.
+		 * Checks whether it is valid Base64-encoding.
+		 */
 		private IdentityID(String id) {
 			if(id.length() > MAX_IDENTITY_ID_LENGTH)
 				throw new IllegalArgumentException("ID is too long, length: " + id.length());
 			
 			try {
-				getRoutingKeyFromID(id);
+				Base64.decode(id);
 			} catch (IllegalBase64Exception e) {
 				throw new RuntimeException("ID does not contain valid Base64: " + id);
 			}
@@ -126,8 +130,44 @@ public class Identity extends Persistent implements Cloneable {
 			mID = id;
 		}
 		
-		public static String constructAndValidate(String id) {
-			return new IdentityID(id).toString();
+		/**
+		 * Constructs an IdentityID from the given {@link FreenetURI}.
+		 * Checks whether the URI is of the right type: Only USK or SSK is accepted.
+		 */
+		private IdentityID(FreenetURI uri) {
+			if(!uri.isUSK() && !uri.isSSK())
+				throw new IllegalArgumentException("URI must be USK or SSK!");
+			
+			try {
+				uri = uri.deriveRequestURIFromInsertURI();
+			} catch(MalformedURLException e) {
+				// It is already a request URI
+			}
+			
+			/* WARNING: When changing this, also update Freetalk.WoT.WoTIdentity.getUIDFromURI()! */
+			mID = Base64.encode(uri.getRoutingKey());
+		}
+		
+		/**
+		 * Constructs an identityID from the given String. This is the inverse of IdentityID.toString().
+		 * Checks whether the String matches the length limit.
+		 * Checks whether it is valid Base64-encoding.
+		 */
+		public static IdentityID constructAndValidateFromString(String id) {
+			return new IdentityID(id);
+		}
+		
+		/**
+		 * Generates a unique ID from a {@link FreenetURI}, which is the routing key of the author encoded with the Freenet-variant of Base64
+		 * We use this to identify identities and perform requests on the database. 
+		 * 
+		 * Checks whether the URI is of the right type: Only USK or SSK is accepted.
+		 * 
+		 * @param uri The requestURI or insertURI of the Identity
+		 * @return An IdentityID to uniquely identify the identity.
+		 */
+		public static IdentityID constructAndValidateFromURI(FreenetURI uri) {
+			return new IdentityID(uri);
 		}
 		
 		@Override
@@ -144,6 +184,16 @@ public class Identity extends Persistent implements Cloneable {
 				return mID.equals((String)o);
 			
 			return false;
+		}
+
+		/**
+		 * Gets the routing key to which this ID is equivalent.
+		 * 
+		 * It is equivalent because:
+		 * An identity is uniquely identified by the USK URI which belongs to it and an USK URI is uniquely identified by its routing key.
+		 */
+		public byte[] getRoutingKey() throws IllegalBase64Exception {
+			return Base64.decode(mID);
 		}
 
 	}
@@ -170,17 +220,17 @@ public class Identity extends Persistent implements Cloneable {
 		//Check that mRequestURI really is a request URI
 		USK.create(mRequestURI);
 		
-		mID = getIDFromURI(mRequestURI);
+		mID = IdentityID.constructAndValidateFromURI(mRequestURI).toString();
 		
 		try {
-			mLatestEditionHint = newRequestURI.getEdition();
+			mLatestEditionHint = Math.max(newRequestURI.getEdition(), 0);
 		} catch (IllegalStateException e) {
 			mLatestEditionHint = 0;
 		}
 		mCurrentEditionFetchState = FetchState.NotFetched;
 		
 		mLastFetchedDate = new Date(0);
-		mLastChangedDate = mCreationDate;
+		mLastChangedDate = (Date)mCreationDate.clone(); // Don't re-use objects which are stored by db4o to prevent issues when they are being deleted.
 		
 		if(newNickname == null) {
 			mNickname = null;
@@ -223,27 +273,6 @@ public class Identity extends Persistent implements Cloneable {
 	}
 
 	/**
-	 * Generates a unique IDfrom a {@link FreenetURI}, which is the routing key of the author encoded with the Freenet-variant of Base64
-	 * We use this to identify identities and perform requests on the database. 
-	 * 
-	 * TODO: Move to class IdentityID.
-	 * 
-	 * @param uri The requestURI of the Identity
-	 * @return A string to uniquely identify the identity.
-	 */
-	public static final String getIDFromURI(FreenetURI uri) {
-		/* WARNING: When changing this, also update Freetalk.WoT.WoTIdentity.getUIDFromURI()! */
-		return Base64.encode(uri.getRoutingKey());
-	}
-	
-	/**
-	 * TODO: Move to class IdentityID.
-	 */
-	public static final byte[] getRoutingKeyFromID(String id) throws IllegalBase64Exception {
-		return Base64.decode(id);
-	}
-
-	/**
 	 * @return The requestURI ({@link FreenetURI}) to fetch this Identity 
 	 */
 	public final FreenetURI getRequestURI() {
@@ -270,7 +299,7 @@ public class Identity extends Persistent implements Cloneable {
 	 * That number is published in trustLists to limit the number of editions a newbie has to fetch before he actually gets ans Identity.
 	 * 
 	 * @param newEdition A long representing the last fetched version of this identity.
-	 * @throws InvalidParameterException If the new edition is less than the current one.
+	 * @throws InvalidParameterException If the new edition is less than the current one. TODO: Evaluate whether we shouldn't be throwing a RuntimeException instead
 	 */
 	protected void setEdition(long newEdition) throws InvalidParameterException {
 		checkedActivate(1);
@@ -359,7 +388,7 @@ public class Identity extends Persistent implements Cloneable {
 	 * @return The date of this Identity's last modification.
 	 */
 	public final Date getLastFetchedDate() {
-		checkedActivate(1); // long is a db4o primitive type so 1 is enough
+		checkedActivate(1); // Date is a db4o primitive type so 1 is enough
 		return (Date)mLastFetchedDate.clone();
 	}
 
@@ -367,7 +396,7 @@ public class Identity extends Persistent implements Cloneable {
 	 * @return The date of this Identity's last modification.
 	 */
 	public final Date getLastChangeDate() {
-		checkedActivate(1);  // long is a db4o primitive type so 1 is enough
+		checkedActivate(1);  // Date is a db4o primitive type so 1 is enough
 		return (Date)mLastChangedDate.clone();
 	}
 	
@@ -375,9 +404,23 @@ public class Identity extends Persistent implements Cloneable {
 	 * Has to be called when the identity was fetched and parsed successfully. Must not be called before setEdition!
 	 */
 	protected final void onFetched() {
+		onFetched(CurrentTimeUTC.get());
+	}
+	
+	/**
+	 * Can be used for restoring the last-fetched date from a copy of the identity.
+	 * When an identity is fetched in normal operation, please use the version without a parameter. 
+	 * 
+	 * Must not be called before setEdition!
+	 */
+	protected final void onFetched(Date fetchDate) {
 		checkedActivate(1);
+		
 		mCurrentEditionFetchState = FetchState.Fetched;
-		mLastFetchedDate = CurrentTimeUTC.get();
+		
+		// checkedDelete(mLastFetchedDate); /* Not stored because db4o considers it as a primitive */
+		mLastFetchedDate = (Date)fetchDate.clone(); // Clone it to prevent duplicate usage of db4o-stored objects
+		
 		updated();
 	}
 	
@@ -386,8 +429,12 @@ public class Identity extends Persistent implements Cloneable {
 	 */
 	protected final void onParsingFailed() {
 		checkedActivate(1);
+		
 		mCurrentEditionFetchState = FetchState.ParsingFailed;
+		
+		// checkedDelete(mLastFetchedDate); /* Not stored because db4o considers it as a primitive */
 		mLastFetchedDate = CurrentTimeUTC.get();
+		
 		updated();
 	}
 
@@ -729,6 +776,7 @@ public class Identity extends Persistent implements Cloneable {
 	 */
 	public final void updated() {
 		checkedActivate(1); // Date is a db4o primitive type so 1 is enough
+		// checkedDelete(mLastChangedDate); /* Not stored because db4o considers it as a primitive */
 		mLastChangedDate = CurrentTimeUTC.get();
 	}
 
@@ -814,7 +862,7 @@ public class Identity extends Persistent implements Cloneable {
 			checkedActivate(4); // For performance only
 			
 			clone.mCurrentEditionFetchState = getCurrentEditionFetchState();
-			clone.setNewEditionHint(getLatestEditionHint()); 
+			clone.mLatestEditionHint = getLatestEditionHint(); // Don't use the setter since it won't lower the current edition hint.
 			clone.setContexts(getContexts());
 			clone.setProperties(getProperties());
 			
@@ -882,13 +930,13 @@ public class Identity extends Persistent implements Cloneable {
 			checkedActivate(4);
 			activateProperties();
 			
-			// mDB.delete(mID); /* Not stored because db4o considers it as a primitive and automatically stores it. */
+			// checkedDelete(mID); /* Not stored because db4o considers it as a primitive and automatically stores it. */
 			mRequestURI.removeFrom(mDB);
 			checkedDelete(mCurrentEditionFetchState); // TODO: Is this still necessary?
-			// mDB.delete(mLastFetchedDate); /* Not stored because db4o considers it as a primitive and automatically stores it. */
-			// mDB.delete(mLastChangedDate); /* Not stored because db4o considers it as a primitive and automatically stores it. */
-			// mDB.delete(mNickname); /* Not stored because db4o considers it as a primitive and automatically stores it. */
-			// mDB.delete(mDoesPublishTrustList); /* Not stored because db4o considers it as a primitive and automatically stores it. */
+			// checkedDelete(mLastFetchedDate); /* Not stored because db4o considers it as a primitive and automatically stores it. */
+			// checkedDelete(mLastChangedDate); /* Not stored because db4o considers it as a primitive and automatically stores it. */
+			// checkedDelete(mNickname); /* Not stored because db4o considers it as a primitive and automatically stores it. */
+			// checkedDelete(mDoesPublishTrustList); /* Not stored because db4o considers it as a primitive and automatically stores it. */
 			checkedDelete(mProperties);
 			checkedDelete(mContexts);
 			checkedDelete();
@@ -908,13 +956,13 @@ public class Identity extends Persistent implements Cloneable {
 		if(mRequestURI == null)
 			throw new NullPointerException("mRequestURI==null");
 		
-		if(!mID.equals(getIDFromURI(mRequestURI)))
+		if(!mID.equals(IdentityID.constructAndValidateFromURI(mRequestURI).toString()))
 			throw new IllegalStateException("ID does not match request URI!");
 		
-		IdentityID.constructAndValidate(mID); // Throws if invalid
+		IdentityID.constructAndValidateFromString(mID); // Throws if invalid
 		
 		if(mCurrentEditionFetchState == null)
-			throw new NullPointerException("mFetchState==null");
+			throw new NullPointerException("mCurrentEditionFetchState==null");
 		
 		if(mLatestEditionHint < 0 || mLatestEditionHint < mRequestURI.getEdition())
 			throw new IllegalStateException("Invalid edition hint: " + mLatestEditionHint + "; current edition: " + mRequestURI.getEdition());
